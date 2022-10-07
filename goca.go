@@ -37,6 +37,7 @@ type Certificate struct {
 	PrivateKey    string                  `json:"private_key" example:"-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----\n"`         // Certificate Private Key string
 	PublicKey     string                  `json:"public_key" example:"-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----\n"`            // Certificate Public Key string
 	CACertificate string                  `json:"ca_certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`      // CA Certificate as string
+	Pkcs12  			[]byte									`json:"pkcs12" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`      // Certificate Private Key on format PKCS8 string
 	privateKey    *rsa.PrivateKey          // Certificate Private Key object rsa.PrivateKey
 	publicKey     *rsa.PublicKey           // Certificate Private Key object rsa.PublicKey
 	csr           *x509.CertificateRequest // Certificate Sigining Request object x509.CertificateRequest
