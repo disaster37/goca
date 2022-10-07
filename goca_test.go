@@ -1,25 +1,14 @@
 package goca
 
 import (
-	"fmt"
-	"os"
-	"path/filepath"
+
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
-
-const CaTestFolder string = "./DoNotUseThisCAPATHTestOnly"
-const GoodKeyPerms os.FileMode = 0600
-
-func tearDown() {
-	os.Unsetenv("GOCATEST")
-	os.RemoveAll(CaTestFolder)
-}
 
 // TestFunctionalRootCACreation creates a RootCA
 func TestFunctionalRootCACreation(t *testing.T) {
-	tearDown()
-	os.Setenv("CAPATH", CaTestFolder)
-	os.Setenv("GOCATEST", "true")
 
 	rootCAIdentity := Identity{
 		Organization:       "GO CA Root Company Inc.",
@@ -31,33 +20,35 @@ func TestFunctionalRootCACreation(t *testing.T) {
 		DNSNames:           []string{"www.go-root.ca", "secure.go-root.ca"},
 	}
 
-	RootCompanyCA, err := New("go-root.ca", rootCAIdentity)
-	if err != nil {
-		t.Errorf("Failing to create the CA")
-	}
-	if RootCompanyCA.IsIntermediate() != false {
-		t.Errorf("Intermediate is true instead false")
-	}
-
-	if RootCompanyCA.Status() != "Certificate Authority is ready." {
-		t.Errorf(RootCompanyCA.Status())
-	}
-
-	fi, err := os.Stat(filepath.Join(CaTestFolder, "go-root.ca", "ca", "key.pem"))
-	if err != nil {
-		t.Errorf("key.pem does not exist for the CA")
-	}
-	if fi.Mode() != GoodKeyPerms {
-		t.Errorf("Expected key.pem permissions " + fmt.Sprint(GoodKeyPerms) + " but got: " + fmt.Sprint(fi.Mode()))
-	}
-
-	t.Log("Tested Creating a Root CA")
-
+	rootCompanyCA, err := New("go-root.ca", rootCAIdentity)
+	assert.NoError(t, err)
+	assert.NotNil(t, rootCompanyCA)
+	assert.False(t, rootCompanyCA.IsIntermediate())
+	assert.Equal(t, "Certificate Authority is ready.", rootCompanyCA.Status())
+	assert.NotEmpty(t, rootCompanyCA.GetCertificate())
+	assert.NotEmpty(t, rootCompanyCA.GetPrivateKey())
+	assert.NotEmpty(t, rootCompanyCA.GetPublicKey())
+	assert.NotEmpty(t, rootCompanyCA.GetCRL())
+	
 }
 
 // Creates a Intermediate CA
 func TestFunctionalIntermediateCACreation(t *testing.T) {
-	os.Setenv("CAPATH", CaTestFolder)
+
+	rootCAIdentity := Identity{
+		Organization:       "GO CA Root Company Inc.",
+		OrganizationalUnit: "Certificates Management",
+		Country:            "NL",
+		Locality:           "Noord-Brabant",
+		Province:           "Veldhoven",
+		Intermediate:       false,
+		DNSNames:           []string{"www.go-root.ca", "secure.go-root.ca"},
+	}
+
+	rootCompanyCA, err := New("go-root.ca", rootCAIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	intermediateCAIdentity := Identity{
 		Organization:       "Intermediate CA Company Inc.",
@@ -68,36 +59,36 @@ func TestFunctionalIntermediateCACreation(t *testing.T) {
 		Intermediate:       true,
 	}
 
-	IntermediateCA, err := NewCA("go-intermediate.ca", "go-root.ca", intermediateCAIdentity)
-	if err != nil {
-		t.Log(err)
-		t.Errorf("Failing to create the CA")
-	}
-
-	if IntermediateCA.IsIntermediate() != true {
-		t.Errorf("Intermediate is false instead true")
-	}
-
-	fi, err := os.Stat(filepath.Join(CaTestFolder, "go-intermediate.ca", "ca", "key.pem"))
-	if err != nil {
-		t.Errorf("key.pem does not exist for the CA")
-	}
-	if fi.Mode() != GoodKeyPerms {
-		t.Errorf("Expected key.pem permissions " + fmt.Sprint(GoodKeyPerms) + " but got: " + fmt.Sprint(fi.Mode()))
-	}
-
-	t.Log("Tested Creating a Intermediate CA")
+	intermediateCA, err := NewCA("go-intermediate.ca", rootCompanyCA.GoCertificate(), rootCompanyCA.GoPrivateKey(), intermediateCAIdentity)
+	assert.NoError(t, err)
+	assert.NotNil(t, intermediateCA)
+	assert.True(t, intermediateCA.IsIntermediate())
+	assert.NotEmpty(t, intermediateCA.GetCertificate())
+	assert.NotEmpty(t, intermediateCA.GetPrivateKey())
+	assert.NotEmpty(t, intermediateCA.GetPublicKey())
+	assert.NotEmpty(t, intermediateCA.GetCRL())
 
 }
 
-func TestFunctionalListCAs(t *testing.T) {
-	if len(List()) == 0 {
-		t.Error("Empty list of CAs")
-	}
-	t.Log(List())
-}
 
 func TestFunctionalRootCAIssueNewCertificate(t *testing.T) {
+
+	rootCAIdentity := Identity{
+		Organization:       "GO CA Root Company Inc.",
+		OrganizationalUnit: "Certificates Management",
+		Country:            "NL",
+		Locality:           "Noord-Brabant",
+		Province:           "Veldhoven",
+		Intermediate:       false,
+		DNSNames:           []string{"www.go-root.ca", "secure.go-root.ca"},
+	}
+
+	rootCA, err := New("go-root.ca", rootCAIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+
 	intranteIdentity := Identity{
 		Organization:       "SFTP Server CA Company Inc.",
 		OrganizationalUnit: "Intermediate Certificates Management",
@@ -108,34 +99,16 @@ func TestFunctionalRootCAIssueNewCertificate(t *testing.T) {
 		DNSNames:           []string{"w3.intranet.go-root.ca"},
 	}
 
-	RootCA, err := Load("go-root.ca")
-	if err != nil {
-		t.Log(err)
-		t.Errorf("Failed to load Root CA")
-	}
-
-	intranetCert, err := RootCA.IssueCertificate("intranet.go-root.ca", intranteIdentity)
-	if err != nil {
-		t.Log(err)
-		t.Errorf("Failed to Root CA issue new certificate (intranet.go-root.ca)")
-	}
-
-	fmt.Println(RootCA.ListCertificates())
-
-	if RootCA.GetCertificate() != intranetCert.GetCACertificate() {
-		t.Log(RootCA.GetCertificate())
-		t.Log(intranetCert.GetCACertificate())
-		t.Error("The CA Certificate is not the same as the Certificate CA Certificate")
-	}
-
-	fi, err := os.Stat(filepath.Join(CaTestFolder, "go-root.ca", "certs", "intranet.go-root.ca", "key.pem"))
-	if err != nil {
-		t.Errorf("key.pem does not exist for the identity")
-	}
-	if fi.Mode() != GoodKeyPerms {
-		t.Errorf("Expected key.pem permissions " + fmt.Sprint(GoodKeyPerms) + " but got: " + fmt.Sprint(fi.Mode()))
-	}
+	intranetCert, err := rootCA.IssueCertificate("intranet.go-root.ca", intranteIdentity)
+	assert.NoError(t, err)
+	assert.NotNil(t, intranetCert)
+	assert.NotEmpty(t, intranetCert.GetCACertificate())
+	assert.NotEmpty(t, intranetCert.GetCertificate())
+	assert.NotEmpty(t, intranetCert.GetCSR())
+	assert.NotEmpty(t, intranetCert.PrivateKey)
 }
+
+/*
 
 func TestFunctionalRootCALoadCertificates(t *testing.T) {
 
@@ -233,3 +206,4 @@ func TestFunctionalRevokeCertificate(t *testing.T) {
 		t.Error("CRL X509 file is empty!")
 	}
 }
+*/

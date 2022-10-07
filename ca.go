@@ -1,28 +1,18 @@
 package goca
 
 import (
-	"bytes"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/pem"
+	"encoding/asn1"
 	"errors"
-	"io/fs"
-	"os"
-	"path/filepath"
+	"net"
 	"time"
 
-	storage "github.com/kairoaraujo/goca/_storage"
-	"github.com/kairoaraujo/goca/cert"
-	"github.com/kairoaraujo/goca/key"
+	"github.com/disaster37/goca/cert"
+	"github.com/disaster37/goca/key"
 )
 
-// Const
-const (
-	certExtension string = ".crt"
-	csrExtension  string = ".csr"
-	crlExtension  string = ".crl"
-)
 
 // A Identity represents the Certificate Authority Identity Information
 type Identity struct {
@@ -33,7 +23,8 @@ type Identity struct {
 	Province           string   `json:"province" example:"Veldhoven"`                           // Province name
 	EmailAddresses     string   `json:"email" example:"sec@company.com"`                        // Email Address
 	DNSNames           []string `json:"dns_names" example:"ca.example.com,root-ca.example.com"` // DNS Names list
-	Intermediate       bool     `json:"intermediate" example:"false"`                           // Intermendiate Certificate Authority (default is false)
+	IPAddresses				 []net.IP `json:"ip_addresses" example:"10.0.0.1,10.0.0.1"` 							// IP addresses list
+ 	Intermediate       bool     `json:"intermediate" example:"false"`                           // Intermendiate Certificate Authority (default is false)
 	KeyBitSize         int      `json:"key_size" example:"2048"`                                // Key Bit Size (defaul: 2048)
 	Valid              int      `json:"valid" example:"365"`                                    // Minimum 1 day, maximum 825 days -- Default: 397
 }
@@ -43,13 +34,13 @@ type Identity struct {
 type CAData struct {
 	CRL            string `json:"crl" example:"-----BEGIN X509 CRL-----...-----END X509 CRL-----\n"`                       // Revocation List string
 	Certificate    string `json:"certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`         // Certificate string
-	CSR            string `json:"csr" example:"-----BEGIN CERTIFICATE REQUEST-----...-----END CERTIFICATE REQUEST-----\n"` // Certificate Signing Request string
+	//CSR            string `json:"csr" example:"-----BEGIN CERTIFICATE REQUEST-----...-----END CERTIFICATE REQUEST-----\n"` // Certificate Signing Request string
 	PrivateKey     string `json:"private_key" example:"-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----\n"`         // Private Key string
 	PublicKey      string `json:"public_key" example:"-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----\n"`            // Public Key string
-	privateKey     rsa.PrivateKey
+	privateKey     *rsa.PrivateKey
 	certificate    *x509.Certificate
-	publicKey      rsa.PublicKey
-	csr            *x509.CertificateRequest
+	publicKey      *rsa.PublicKey
+	//csr            *x509.CertificateRequest
 	crl            *pkix.CertificateList
 	IsIntermediate bool
 }
@@ -57,39 +48,18 @@ type CAData struct {
 // ErrCAMissingInfo means that all information goca.Information{} is required
 var ErrCAMissingInfo = errors.New("all CA details ('Organization', 'Organizational Unit', 'Country', 'Locality', 'Province') are required")
 
-// ErrCAGenerateExists means that the CA with the same Common Name exists in
-// the $CAPATH.
-var ErrCAGenerateExists = errors.New("a Certificate Authority with this common name already exists")
-
-// ErrCALoadNotFound means that CA was not found in $CAPATH to be loaded.
-var ErrCALoadNotFound = errors.New("the requested Certificate Authority does not exist")
-
-// ErrCertLoadNotFound means that certificate was not found in $CAPATH to be loaded.
-var ErrCertLoadNotFound = errors.New("the requested Certificate does not exist")
-
 // ErrCertRevoked means that certificate was not found in $CAPATH to be loaded.
 var ErrCertRevoked = errors.New("the requested Certificate is already revoked")
 
 var ErrParentCommonNameNotSpecified = errors.New("parent common name is empty when creating an intermediate CA certificate")
 
-func (c *CA) create(commonName, parentCommonName string, id Identity) error {
+// create permit to create new CA or intermediate CA
+func (c *CA) create(commonName string, parentCertificate *x509.Certificate, parentPrivateKey *rsa.PrivateKey, id Identity) error {
 
 	caData := CAData{}
 
-	// verifies if the CA, based in the 'common name', exists
-	caStorage := storage.CAStorage(commonName)
-	if caStorage {
-		return ErrCAGenerateExists
-	}
-
 	var (
-		caDir           string = filepath.Join(commonName, "ca")
-		caCertsDir      string = filepath.Join(commonName, "certs")
-		keyString       []byte
-		publicKeyString []byte
 		certBytes       []byte
-		certString      []byte
-		crlString       []byte
 		err             error
 	)
 
@@ -97,35 +67,28 @@ func (c *CA) create(commonName, parentCommonName string, id Identity) error {
 		return ErrCAMissingInfo
 	}
 
-	if err := storage.MakeFolder(os.Getenv("CAPATH"), caDir); err != nil {
-		return err
-	}
 
-	if err := storage.MakeFolder(os.Getenv("CAPATH"), caCertsDir); err != nil {
-		return err
-	}
-
-	caKeys, err := key.CreateKeys(commonName, commonName, storage.CreationTypeCA, id.KeyBitSize)
+	caKeys, err := key.CreateKeys(commonName, commonName, id.KeyBitSize)
 	if err != nil {
 		return err
 	}
 
-	if keyString, err = storage.LoadFile(caDir, "key.pem"); err != nil {
-		keyString = []byte{}
+	privateKeyPem, err := key.ConvertPrivateKeyFromDerToPem(caKeys.Key)
+	if err != nil {
+		return err
 	}
 
-	if publicKeyString, err = storage.LoadFile(caCertsDir, "key.pub"); err != nil {
-		publicKeyString = []byte{}
+	publicKeyPem, err := key.ConvertPublicKeyFromDerToPem(caKeys.PublicKey)
+	if err != nil {
+		return err
 	}
-
-	privKey := &caKeys.Key
-	pubKey := &caKeys.PublicKey
 
 	caData.privateKey = caKeys.Key
-	caData.PrivateKey = string(keyString)
+	caData.PrivateKey = string(privateKeyPem)
 	caData.publicKey = caKeys.PublicKey
-	caData.PublicKey = string(publicKeyString)
+	caData.PublicKey = string(publicKeyPem)
 
+	// is not intermediate CA
 	if !id.Intermediate {
 		caData.IsIntermediate = false
 		certBytes, err = cert.CreateRootCert(
@@ -139,23 +102,16 @@ func (c *CA) create(commonName, parentCommonName string, id Identity) error {
 			id.EmailAddresses,
 			id.Valid,
 			id.DNSNames,
-			privKey,
-			pubKey,
-			storage.CreationTypeCA,
+			id.IPAddresses,
+			caKeys.Key,
+			caKeys.PublicKey,
 		)
 	} else {
-		if parentCommonName == "" {
+		// Is intermediate CA
+		if parentCertificate == nil || parentPrivateKey == nil {
 			return ErrParentCommonNameNotSpecified
 		}
-		var (
-			parentCertificate *x509.Certificate
-			parentPrivateKey  *rsa.PrivateKey
-		)
 		caData.IsIntermediate = true
-		parentCertificate, parentPrivateKey, err = cert.LoadParentCACertificate(parentCommonName)
-		if err != nil {
-			return nil
-		}
 
 		certBytes, err = cert.CreateCACert(
 			commonName,
@@ -168,293 +124,205 @@ func (c *CA) create(commonName, parentCommonName string, id Identity) error {
 			id.EmailAddresses,
 			id.Valid,
 			id.DNSNames,
-			privKey,
+			id.IPAddresses,
+			caKeys.Key,
 			parentPrivateKey,
 			parentCertificate,
-			pubKey,
-			storage.CreationTypeCA,
+			caKeys.PublicKey,
 		)
 	}
 	if err != nil {
 		return err
 	}
-	certificate, _ := x509.ParseCertificate(certBytes)
-
-	if certString, err = storage.LoadFile(caDir, commonName+certExtension); err != nil {
-		certString = []byte{}
-	}
-
-	caData.certificate = certificate
-	caData.Certificate = string(certString)
-
-	crlBytes, err := cert.RevokeCertificate(c.CommonName, []pkix.RevokedCertificate{}, certificate, privKey)
+	certificate, err := x509.ParseCertificate(certBytes)
 	if err != nil {
-		crl, err := x509.ParseCRL(crlBytes)
-		if err != nil {
-			caData.crl = crl
-		}
+		return err
 	}
+	caData.certificate = certificate
 
-	if crlString, err = storage.LoadFile(caDir, commonName+crlExtension); err != nil {
-		crlString = []byte{}
+	crtPem, err := cert.ConvertCertificateFromDerToPem(certBytes)
+	if err != nil {
+		return err
 	}
-
-	c.Data.CRL = string(crlString)
-	c.Data = caData
-
-	return nil
-}
-
-func (c *CA) loadCA(commonName string) error {
-
-	caData := CAData{}
-
-	var (
-		caDir           string = filepath.Join(commonName, "ca")
-		keyString       []byte
-		publicKeyString []byte
-		csrString       []byte
-		certString      []byte
-		crlString       []byte
-		loadErr         error
-	)
-
-	// verifies if the CA, based in the 'common name', exists
-	caStorage := storage.CAStorage(commonName)
-	if !caStorage {
-		return ErrCALoadNotFound
+	caData.Certificate = string(crtPem)
+	
+	crlBytes, err := cert.RevokeCertificate(c.CommonName, []pkix.RevokedCertificate{}, certificate, caKeys.Key)
+	if err != nil {
+		return err
 	}
-
-	if keyString, loadErr = storage.LoadFile(caDir, "key.pem"); loadErr == nil {
-		privateKey, err := key.LoadPrivateKey(keyString)
-		if err != nil {
-			return err
-		}
-		caData.PrivateKey = string(keyString)
-		caData.privateKey = *privateKey
-	} else {
-		return loadErr
+	crl, err := x509.ParseCRL(crlBytes)
+	if err != nil {
+		return err
 	}
+	caData.crl = crl
 
-	if publicKeyString, loadErr = storage.LoadFile(caDir, "key.pub"); loadErr == nil {
-		publicKey, err := key.LoadPublicKey(publicKeyString)
-		if err != nil {
-			return err
-		}
-		caData.PublicKey = string(publicKeyString)
-		caData.publicKey = *publicKey
-	} else {
-		return loadErr
+	crlPem, err := cert.ConvertCRLFromDerToPem(crlBytes)
+	if err != nil {
+		return err
 	}
-
-	if csrString, loadErr = storage.LoadFile(caDir, commonName+csrExtension); loadErr == nil {
-		csr, err := cert.LoadCSR(csrString)
-		if err != nil {
-			return err
-		}
-		caData.CSR = string(csrString)
-		caData.csr = csr
-	}
-
-	if certString, loadErr = storage.LoadFile(caDir, commonName+certExtension); loadErr == nil {
-		cert, err := cert.LoadCert(certString)
-		if err != nil {
-			return err
-		}
-		caData.Certificate = string(certString)
-		caData.certificate = cert
-	}
-
-	if crlString, loadErr = storage.LoadFile(caDir, c.CommonName+crlExtension); loadErr == nil {
-		crl, err := cert.LoadCRL(crlString)
-		if err != nil {
-			return err
-		}
-		caData.CRL = string(crlString)
-		caData.crl = crl
-	}
+	caData.CRL = string(crlPem)
 
 	c.Data = caData
 
 	return nil
 }
 
-func (c *CA) signCSR(csr x509.CertificateRequest, valid int) (certificate Certificate, err error) {
+// loadCA permti to load existing CA
+func (c *CA) LoadCA(privateKeyPem []byte, publicKeyPem []byte, certPem []byte, crlPem []byte) error {
 
-	certificate = Certificate{
+	if len(privateKeyPem) == 0 {
+		return errors.New("Private key must be provided")
+	}
+	if len(publicKeyPem) == 0 {
+		return errors.New("Public key must be provided")
+	}
+	if len(certPem) == 0 {
+		return errors.New("Certificate must be provided")
+	}
+
+	caData := CAData{
+		PrivateKey: string(privateKeyPem),
+		PublicKey: string(publicKeyPem),
+		Certificate: string(certPem),
+		CRL: string(crlPem),
+	}
+
+	privateKey, err := key.LoadPrivateKeyFromPem(privateKeyPem)
+	if err != nil {
+		return err
+	}
+	caData.privateKey = privateKey
+
+	publicKey, err := key.LoadPublicKeyFromPem(publicKeyPem)
+	if err != nil {
+		return err
+	}
+	caData.publicKey = publicKey
+
+	crt, err := cert.LoadCertFromPem(certPem)
+	if err != nil {
+		return err
+	}
+	caData.certificate = crt
+
+	crl, err := cert.LoadCRLFromPem(crlPem)
+	if err != nil {
+		return err
+	}
+	caData.crl = crl
+	
+	c.Data = caData
+
+	return nil
+}
+
+// signCSR permit to generate certificate from CSR
+func (c *CA) signCSR(csr *x509.CertificateRequest, valid int) (certificate *Certificate, err error) {
+
+	certificate = &Certificate{
 		commonName:    csr.Subject.CommonName,
 		csr:           csr,
 		caCertificate: c.Data.certificate,
 		CACertificate: c.Data.Certificate,
 	}
 
-	if csrString, err := storage.LoadFile(c.CommonName, "cert", certificate.commonName+csrExtension); err == nil {
-		_, err := cert.LoadCSR(csrString)
-		if err != nil {
-			return certificate, err
-		}
-		certificate.CSR = string(csrString)
+	csrDer, err := asn1.Marshal(csr)
+	if err != nil {
+			return nil, err
 	}
+	csrPem, err := cert.ConvertCSRFromDerToPem(csrDer)
+	if err != nil {
+		return nil, err
+	}
+	certificate.CSR = string(csrPem)
 
-	certBytes, err := cert.CASignCSR(c.CommonName, csr, c.Data.certificate, &c.Data.privateKey, valid, storage.CreationTypeCertificate)
+	certBytes, err := cert.CASignCSR(c.CommonName, csr, c.Data.certificate, c.Data.privateKey, valid)
 	if err != nil {
 		return certificate, err
 	}
 
-	var certRow bytes.Buffer
-	var pemCert = &pem.Block{Type: "CERTIFICATE", Bytes: certBytes}
-	_ = pem.Encode(&certRow, pemCert)
-
-	certificate.Certificate = string(certRow.String())
-
-	cert, err := x509.ParseCertificate(certBytes)
+	crt, err := x509.ParseCertificate(certBytes)
 	if err != nil {
-		return certificate, err
+		return nil, err
 	}
+	certificate.certificate = crt
 
-	certificate.certificate = cert
-
-	// if we are signing another CA, we need to make sure the certificate file also
-	// exists under the signed CA's $CAPATH directory, not just the signing CA's directory.
-	knownCAs := List()
-	for _, knownCA := range knownCAs {
-		if knownCA == certificate.commonName {
-			srcPath := filepath.Join(c.CommonName, "certs", certificate.commonName, certificate.commonName+certExtension)
-			destPath := filepath.Join(certificate.commonName, "ca", certificate.commonName+certExtension)
-
-			err = storage.CopyFile(srcPath, destPath)
-			if err != nil {
-				return certificate, err
-			}
-
-			break
-		}
+	crtPem, err := cert.ConvertCertificateFromDerToPem(certBytes)
+	if err != nil {
+		return nil, err
 	}
+	certificate.Certificate = string(crtPem)
 
 	return certificate, err
-
 }
 
-func (c *CA) issueCertificate(commonName string, id Identity) (certificate Certificate, err error) {
+// issueCertificate permit to generate new certificate signed by CA
+func (c *CA) issueCertificate(commonName string, id Identity) (certificate *Certificate, err error) {
 
-	var (
-		caCertsDir      string = filepath.Join(c.CommonName, "certs")
-		keyString       []byte
-		publicKeyString []byte
-		csrString       []byte
-	)
+	certificate = &Certificate{
+		caCertificate: c.Data.certificate,
+		CACertificate: c.Data.Certificate,
+	} 
 
-	certificate.CACertificate = c.Data.Certificate
-	certificate.caCertificate = c.Data.certificate
-
-	certKeys, err := key.CreateKeys(c.CommonName, commonName, storage.CreationTypeCertificate, id.KeyBitSize)
+	certKeys, err := key.CreateKeys(c.CommonName, commonName, id.KeyBitSize)
 	if err != nil {
-		return certificate, err
+		return nil, err
 	}
 
-	if keyString, err = storage.LoadFile(caCertsDir, commonName, "key.pem"); err != nil {
-		keyString = []byte{}
-	}
-
-	if publicKeyString, err = storage.LoadFile(caCertsDir, commonName, "key.pub"); err != nil {
-		publicKeyString = []byte{}
-	}
-
-	privKey := &certKeys.Key
-	pubKey := &certKeys.PublicKey
-
-	certificate.privateKey = *privKey
-	certificate.PrivateKey = string(keyString)
-	certificate.publicKey = *pubKey
-	certificate.PublicKey = string(publicKeyString)
-
-	csrBytes, err := cert.CreateCSR(c.CommonName, commonName, id.Country, id.Province, id.Locality, id.Organization, id.OrganizationalUnit, id.EmailAddresses, id.DNSNames, privKey, storage.CreationTypeCertificate)
+	privateKeyPem, err := key.ConvertPrivateKeyFromDerToPem(certKeys.Key)
 	if err != nil {
-		return certificate, err
+		return nil, err
+	}
+
+	publicKeyPem, err := key.ConvertPublicKeyFromDerToPem(certKeys.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	certificate.privateKey = certKeys.Key
+	certificate.PrivateKey = string(privateKeyPem)
+	certificate.publicKey = certKeys.PublicKey
+	certificate.PublicKey = string(publicKeyPem)
+
+	csrBytes, err := cert.CreateCSR(c.CommonName, commonName, id.Country, id.Province, id.Locality, id.Organization, id.OrganizationalUnit, id.EmailAddresses, id.DNSNames, id.IPAddresses, certKeys.Key)
+	if err != nil {
+		return nil, err
 	}
 
 	csr, _ := x509.ParseCertificateRequest(csrBytes)
-	if csrString, err = storage.LoadFile(caCertsDir, commonName, commonName+csrExtension); err != nil {
-		csrString = []byte{}
-	}
-
-	certificate.csr = *csr
-	certificate.CSR = string(csrString)
-	certBytes, err := cert.CASignCSR(c.CommonName, *csr, c.Data.certificate, &c.Data.privateKey, id.Valid, storage.CreationTypeCertificate)
+	csrPem, err := cert.ConvertCSRFromDerToPem(csrBytes)
 	if err != nil {
-		return certificate, err
+		return nil, err
 	}
 
-	var certRow bytes.Buffer
-	var pemCert = &pem.Block{Type: "CERTIFICATE", Bytes: certBytes}
-	_ = pem.Encode(&certRow, pemCert)
-
-	certificate.Certificate = string(certRow.String())
-
-	cert, err := x509.ParseCertificate(certBytes)
+	certificate.csr = csr
+	certificate.CSR = string(csrPem)
+	certBytes, err := cert.CASignCSR(c.CommonName, csr, c.Data.certificate, c.Data.privateKey, id.Valid)
 	if err != nil {
-		return certificate, err
+		return nil, err
 	}
 
-	certificate.certificate = cert
+	crt, err := x509.ParseCertificate(certBytes)
+	if err != nil {
+		return nil, err
+	}
+	certificate.certificate = crt
+
+	certificatePem, err := cert.ConvertCertificateFromDerToPem(certBytes)
+	if err != nil {
+		return nil, err
+	}
+	certificate.Certificate = string(certificatePem)
 
 	return certificate, nil
 
 }
 
-func (c *CA) loadCertificate(commonName string) (certificate Certificate, err error) {
-
-	var (
-		caCertsDir      string = filepath.Join(c.CommonName, "certs", commonName)
-		keyString       []byte
-		publicKeyString []byte
-		csrString       []byte
-		certString      []byte
-		loadErr         error
-	)
-
-	if _, err := os.Stat(filepath.Join(os.Getenv("CAPATH"), caCertsDir)); errors.Is(err, fs.ErrNotExist) {
-		return certificate, ErrCertLoadNotFound
-	}
-
-	certificate.CACertificate = c.Data.Certificate
-	certificate.caCertificate = c.Data.certificate
-
-	if keyString, loadErr = storage.LoadFile(caCertsDir, "key.pem"); loadErr == nil {
-		privateKey, _ := key.LoadPrivateKey(keyString)
-		certificate.PrivateKey = string(keyString)
-		certificate.privateKey = *privateKey
-	}
-
-	if publicKeyString, loadErr = storage.LoadFile(caCertsDir, "key.pub"); loadErr == nil {
-		publicKey, _ := key.LoadPublicKey(publicKeyString)
-		certificate.PublicKey = string(publicKeyString)
-		certificate.publicKey = *publicKey
-	}
-
-	if csrString, loadErr = storage.LoadFile(caCertsDir, commonName+csrExtension); loadErr == nil {
-		csr, _ := cert.LoadCSR(csrString)
-		certificate.CSR = string(csrString)
-		certificate.csr = *csr
-	}
-
-	if certString, loadErr = storage.LoadFile(caCertsDir, commonName+certExtension); loadErr == nil {
-		cert, err := cert.LoadCert(certString)
-		if err != nil {
-			return certificate, err
-		}
-		certificate.Certificate = string(certString)
-		certificate.certificate = cert
-	}
-
-	return certificate, nil
-}
-
+// revokeCertificate permit to revoke certificate
+// It add it on  rovokated list
 func (c *CA) revokeCertificate(certificate *x509.Certificate) error {
 
 	var revokedCerts []pkix.RevokedCertificate
-	var caDir string = filepath.Join(c.CommonName, "ca")
-	var crlString []byte
 
 	currentCRL := c.GoCRL()
 	if currentCRL != nil {
@@ -474,7 +342,7 @@ func (c *CA) revokeCertificate(certificate *x509.Certificate) error {
 
 	revokedCerts = append(revokedCerts, newCertRevoke)
 
-	crlByte, err := cert.RevokeCertificate(c.CommonName, revokedCerts, c.Data.certificate, &c.Data.privateKey)
+	crlByte, err := cert.RevokeCertificate(c.CommonName, revokedCerts, c.Data.certificate, c.Data.privateKey)
 	if err != nil {
 		return err
 	}
@@ -485,11 +353,11 @@ func (c *CA) revokeCertificate(certificate *x509.Certificate) error {
 	}
 	c.Data.crl = crl
 
-	if crlString, err = storage.LoadFile(caDir, c.CommonName+crlExtension); err != nil {
-		crlString = []byte{}
+	crlPem, err := cert.ConvertCRLFromDerToPem(crlByte)
+	if err != nil {
+		return err
 	}
-
-	c.Data.CRL = string(crlString)
+	c.Data.CRL = string(crlPem)
 
 	return nil
 }

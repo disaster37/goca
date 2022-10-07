@@ -31,30 +31,27 @@
 package cert
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/pem"
-	"errors"
 	"math/big"
-	"path/filepath"
+	"net"
 	"time"
 
-	storage "github.com/kairoaraujo/goca/_storage"
-	"github.com/kairoaraujo/goca/key"
+	"github.com/pkg/errors"
 )
 
 const (
 	// MinValidCert is the minimal valid time: 1 day
 	MinValidCert int = 1
-	// MaxValidCert is the maximum valid time: 825 day
-	MaxValidCert int = 825
+	// MaxValidCert is the maximum valid time: 3650 day
+	MaxValidCert int = 3650
 	// DefaultValidCert is the default valid time: 397 days
 	DefaultValidCert int = 397
-	// Certificate file extension
-	certExtension string = ".crt"
 )
 
 // ErrCertExists means that the certificate requested already exists
@@ -70,9 +67,8 @@ func newSerialNumber() (serialNumber *big.Int) {
 }
 
 // CreateCSR creates a Certificate Signing Request returning certData with CSR.
-//
-// The CSR is also stored in $CAPATH with extension .csr
-func CreateCSR(CACommonName, commonName, country, province, locality, organization, organizationalUnit, emailAddresses string, dnsNames []string, priv *rsa.PrivateKey, creationType storage.CreationType) (csr []byte, err error) {
+// The returned CSR is on DER format
+func CreateCSR(CACommonName, commonName, country, province, locality, organization, organizationalUnit, emailAddresses string, dnsNames []string, ipAddresses []net.IP, priv *rsa.PrivateKey) (csrDer []byte, err error) {
 	var oidEmailAddress = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1}
 
 	subject := pkix.Name{
@@ -93,84 +89,44 @@ func CreateCSR(CACommonName, commonName, country, province, locality, organizati
 		RawSubject:         asn1Subj,
 		EmailAddresses:     []string{emailAddresses},
 		SignatureAlgorithm: x509.SHA256WithRSA,
+		IPAddresses: ipAddresses,
 	}
 
 	dnsNames = append(dnsNames, commonName)
 	template.DNSNames = dnsNames
 
-	csr, err = x509.CreateCertificateRequest(rand.Reader, &template, priv)
-	if err != nil {
-		return csr, err
-	}
-
-	fileData := storage.File{
-		CA:           CACommonName,
-		CommonName:   commonName,
-		FileType:     storage.FileTypeCSR,
-		CSRData:      csr,
-		CreationType: creationType,
-	}
-
-	err = storage.SaveFile(fileData)
-
-	if err != nil {
-		return csr, err
-	}
-
-	return csr, nil
+	return x509.CreateCertificateRequest(rand.Reader, &template, priv)
 }
 
-// LoadCSR loads a Certificate Signing Request from a read file.
-//
-// Using ioutil.ReadFile() satisfyies the read file.
-func LoadCSR(csrString []byte) (*x509.CertificateRequest, error) {
-	block, _ := pem.Decode([]byte(string(csrString)))
+// ConvertCSRFromDerToPem permit to convert CSR from DER format to PEM format
+func ConvertCSRFromDerToPem(csrDer []byte) (csrPem []byte, err error) {
+	pemCSR := &pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDer}
+	var pemBuff bytes.Buffer
+	err = pem.Encode(&pemBuff, pemCSR)
+	if err != nil {
+		return nil, err
+	}
+
+	return pemBuff.Bytes(), nil
+}
+
+// LoadCSR loads a Certificate Signing Request from pem contend.
+func LoadCSRFromPem(csrPem []byte) (*x509.CertificateRequest, error) {
+	block, _ := pem.Decode(csrPem)
 	csr, _ := x509.ParseCertificateRequest(block.Bytes)
 
 	return csr, nil
 }
 
-// LoadCRL loads a Certificate Revocation List from a read file.
-//
-// Using ioutil.ReadFile() satisfyies the read file.
-func LoadCRL(crlString []byte) (*pkix.CertificateList, error) {
-	block, _ := pem.Decode([]byte(string(crlString)))
+
+// LoadCRL loads a Certificate Revocation List from a pem contend.
+func LoadCRLFromPem(crlPem []byte) (*pkix.CertificateList, error) {
+	block, _ := pem.Decode(crlPem)
 	crl, _ := x509.ParseCRL(block.Bytes)
 
 	return crl, nil
 }
 
-// LoadParentCACertificate loads parent CA's certificate and private key
-//
-// TODO maybe make this more generic, something like LoadCACertificate that
-// returns the certificate and private/public key
-func LoadParentCACertificate(commonName string) (certificate *x509.Certificate, privateKey *rsa.PrivateKey, err error) {
-	caStorage := storage.CAStorage(commonName)
-	if !caStorage {
-		return nil, nil, ErrParentCANotFound
-	}
-
-	var caDir = filepath.Join(commonName, "ca")
-
-	if keyString, loadErr := storage.LoadFile(filepath.Join(caDir, "key.pem")); loadErr == nil {
-		privateKey, err = key.LoadPrivateKey(keyString)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else {
-		return nil, nil, loadErr
-	}
-
-	if certString, loadErr := storage.LoadFile(filepath.Join(caDir, commonName+certExtension)); loadErr == nil {
-		certificate, err = LoadCert(certString)
-		if err != nil {
-			return nil, nil, err
-		}
-	} else {
-		return nil, nil, loadErr
-	}
-	return certificate, privateKey, nil
-}
 
 // CreateRootCert creates a Root CA Certificate (self-signed)
 func CreateRootCert(
@@ -184,11 +140,11 @@ func CreateRootCert(
 	emailAddresses string,
 	valid int,
 	dnsNames []string,
+	ipAddresses []net.IP,
 	privateKey *rsa.PrivateKey,
 	publicKey *rsa.PublicKey,
-	creationType storage.CreationType,
-) (cert []byte, err error) {
-	cert, err = CreateCACert(
+) (certDer []byte, err error) {
+	certDer, err = CreateCACert(
 		CACommonName,
 		commonName,
 		country,
@@ -199,12 +155,12 @@ func CreateRootCert(
 		emailAddresses,
 		valid,
 		dnsNames,
+		ipAddresses,
 		privateKey,
 		nil, // parentPrivateKey
 		nil, // parentCertificate
-		publicKey,
-		creationType)
-	return cert, err
+		publicKey)
+	return certDer, err
 }
 
 // CreateCACert creates a CA Certificate
@@ -223,12 +179,11 @@ func CreateCACert(
 	emailAddresses string,
 	validDays int,
 	dnsNames []string,
+	ipAddresses []net.IP,
 	privateKey,
 	parentPrivateKey *rsa.PrivateKey,
 	parentCertificate *x509.Certificate,
-	publicKey *rsa.PublicKey,
-	creationType storage.CreationType,
-) (cert []byte, err error) {
+	publicKey *rsa.PublicKey) (certDer []byte, err error) {
 	if validDays == 0 {
 		validDays = DefaultValidCert
 	}
@@ -244,12 +199,13 @@ func CreateCACert(
 			// TODO: StreetAddress: []string{"ADDRESS"},
 			// TODO: PostalCode:    []string{"POSTAL_CODE"},
 		},
-		NotBefore:             time.Now(),
+		NotBefore:             time.Now().Add(-time.Minute * 10),
 		NotAfter:              time.Now().AddDate(0, 0, validDays),
 		IsCA:                  true,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
+		IPAddresses: ipAddresses,
 	}
 	dnsNames = append(dnsNames, commonName)
 	caCert.DNSNames = dnsNames
@@ -262,78 +218,39 @@ func CreateCACert(
 	if parentCertificate != nil {
 		signingCertificate = parentCertificate
 	}
-	cert, err = x509.CreateCertificate(rand.Reader, caCert, signingCertificate, publicKey, signingPrivateKey)
-	if err != nil {
-		return nil, err
-	}
-
-	fileData := storage.File{
-		CA:           CACommonName,
-		CommonName:   commonName,
-		FileType:     storage.FileTypeCertificate,
-		CertData:     cert,
-		CreationType: creationType,
-	}
-	err = storage.SaveFile(fileData)
-	if err != nil {
-		return nil, err
-	}
-
-	// When creating intermediate CA certificates, store the certificates to its
-	// parent CA's cert dir
-	if parentCertificate != nil {
-		fileData := storage.File{
-			CA:           parentCertificate.Subject.CommonName,
-			CommonName:   commonName,
-			FileType:     storage.FileTypeCertificate,
-			CreationType: storage.CreationTypeCertificate,
-			CertData:     cert,
-		}
-		err = storage.SaveFile(fileData)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	return cert, nil
+	return x509.CreateCertificate(rand.Reader, caCert, signingCertificate, publicKey, signingPrivateKey)
+	
 }
 
-// LoadCert loads a certifiate from a read file (bytes).
-//
-// Using ioutil.ReadFile() satisfyies the read file.
-func LoadCert(certString []byte) (*x509.Certificate, error) {
+// LoadCert loads a certifiate from a pem contend.
+func LoadCertFromPem(certString []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(string(certString)))
 	cert, _ := x509.ParseCertificate(block.Bytes)
 	return cert, nil
 }
 
-// CASignCSR signs an Certificate Signing Request and returns the Certificate as Go bytes.
-//
-// A file is also stored in $CAPATH/certs/<CSR Common Name>/<CSR Common Name>.crt
-func CASignCSR(CACommonName string, csr x509.CertificateRequest, caCert *x509.Certificate, privKey *rsa.PrivateKey, valid int, creationType storage.CreationType) (cert []byte, err error) {
-	if valid == 0 {
-		valid = DefaultValidCert
-
-	} else if valid > MaxValidCert || valid < MinValidCert {
-		return nil, errors.New("the certificate valid (min/max) is not between 1 - 825")
-	}
-
-	fileData := storage.File{
-		CA:           CACommonName,
-		CommonName:   csr.Subject.CommonName,
-		FileType:     storage.FileTypeCertificate,
-		CreationType: creationType,
-	}
-
-	if storage.CheckCertExists(fileData) {
-		return nil, ErrCertExists
-	}
-
+// ConvertCertificateFromDerToPem permit to convert certificate from DER format to PEM format
+func ConvertCertificateFromDerToPem(certDer []byte) (certPem []byte, err error) {
+	var pemCert = &pem.Block{Type: "CERTIFICATE", Bytes: certDer}
+	var pemBuff bytes.Buffer
+	err = pem.Encode(&pemBuff, pemCert)
 	if err != nil {
 		return nil, err
 	}
 
-	csrTemplate := x509.Certificate{
+	return pemBuff.Bytes(), nil
+}
+
+// CASignCSR signs an Certificate Signing Request and returns the Certificate as Go bytes.
+func CASignCSR(CACommonName string, csr *x509.CertificateRequest, caCert *x509.Certificate, privKey *rsa.PrivateKey, valid int) (certDer []byte, err error) {
+	if valid == 0 {
+		valid = DefaultValidCert
+
+	} else if valid > MaxValidCert || valid < MinValidCert {
+		return nil, errors.Errorf("the certificate valid (min/max) is not between %d - %d", MinValidCert, MaxValidCert)
+	}
+
+	csrTemplate := &x509.Certificate{
 		Signature:          csr.Signature,
 		SignatureAlgorithm: csr.SignatureAlgorithm,
 
@@ -347,29 +264,15 @@ func CASignCSR(CACommonName string, csr x509.CertificateRequest, caCert *x509.Ce
 		NotAfter:     time.Now().AddDate(0, 0, valid),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		DNSNames: csr.DNSNames,
+		IPAddresses: csr.IPAddresses,
 	}
 
-	csrTemplate.DNSNames = csr.DNSNames
-
-	cert, err = x509.CreateCertificate(rand.Reader, &csrTemplate, caCert, csrTemplate.PublicKey, privKey)
-	if err != nil {
-		return nil, err
-	}
-
-	fileData.CertData = cert
-
-	err = storage.SaveFile(fileData)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return cert, nil
-
+	return x509.CreateCertificate(rand.Reader, csrTemplate, caCert, csrTemplate.PublicKey, privKey)
 }
 
 // RevokeCertificate is used to revoke a certificate (added to the revoked list)
-func RevokeCertificate(CACommonName string, certificateList []pkix.RevokedCertificate, caCert *x509.Certificate, privKey *rsa.PrivateKey) (crl []byte, err error) {
+func RevokeCertificate(CACommonName string, certificateList []pkix.RevokedCertificate, caCert *x509.Certificate, privKey *rsa.PrivateKey) (crlDer []byte, err error) {
 
 	crlTemplate := x509.RevocationList{
 		SignatureAlgorithm:  caCert.SignatureAlgorithm,
@@ -379,24 +282,18 @@ func RevokeCertificate(CACommonName string, certificateList []pkix.RevokedCertif
 		NextUpdate:          time.Now().AddDate(0, 0, 1),
 	}
 
-	crlByte, err := x509.CreateRevocationList(rand.Reader, &crlTemplate, caCert, privKey)
+	return x509.CreateRevocationList(rand.Reader, &crlTemplate, caCert, privKey)
+}
+
+// ConvertCRLFromDerToPem permit to convert CLR from DER format to PEM format
+func ConvertCRLFromDerToPem(crlDer []byte) (crlPem []byte, err error) {
+	var pemCRL = &pem.Block{Type: "X509 CRL", Bytes: crlDer}
+	var pemBuff bytes.Buffer
+
+	err = pem.Encode(&pemBuff, pemCRL)
 	if err != nil {
 		return nil, err
 	}
 
-	fileData := storage.File{
-		CA:           CACommonName,
-		CommonName:   CACommonName,
-		FileType:     storage.FileTypeCRL,
-		CRLData:      crlByte,
-		CreationType: storage.CreationTypeCA,
-	}
-
-	err = storage.SaveFile(fileData)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return crlByte, err
+	return pemBuff.Bytes(), err
 }

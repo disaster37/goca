@@ -21,7 +21,6 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 
-	storage "github.com/kairoaraujo/goca/_storage"
 )
 
 // CA represents the basic CA data
@@ -38,9 +37,9 @@ type Certificate struct {
 	PrivateKey    string                  `json:"private_key" example:"-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----\n"`         // Certificate Private Key string
 	PublicKey     string                  `json:"public_key" example:"-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----\n"`            // Certificate Public Key string
 	CACertificate string                  `json:"ca_certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`      // CA Certificate as string
-	privateKey    rsa.PrivateKey          // Certificate Private Key object rsa.PrivateKey
-	publicKey     rsa.PublicKey           // Certificate Private Key object rsa.PublicKey
-	csr           x509.CertificateRequest // Certificate Sigining Request object x509.CertificateRequest
+	privateKey    *rsa.PrivateKey          // Certificate Private Key object rsa.PrivateKey
+	publicKey     *rsa.PublicKey           // Certificate Private Key object rsa.PublicKey
+	csr           *x509.CertificateRequest // Certificate Sigining Request object x509.CertificateRequest
 	certificate   *x509.Certificate       // Certificate certificate *x509.Certificate
 	caCertificate *x509.Certificate       // CA Certificate *x509.Certificate
 }
@@ -49,41 +48,21 @@ type Certificate struct {
 // Certificate Authority
 //
 
-// Load an existent Certificate Authority from $CAPATH
-func Load(commonName string) (ca CA, err error) {
-	ca = CA{
-		CommonName: commonName,
-	}
-
-	err = ca.loadCA(commonName)
-	if err != nil {
-		return CA{}, err
-	}
-
-	return ca, nil
-
-}
-
-// List list all existent Certificate Authorities in $CAPATH
-func List() []string {
-	return storage.ListCAs()
-}
-
 // New creat new Certificate Authority
-func New(commonName string, identity Identity) (ca CA, err error) {
-	ca, err = NewCA(commonName, "", identity)
+func New(commonName string, identity Identity) (ca *CA, err error) {
+	ca, err = NewCA(commonName, nil, nil, identity)
 	return ca, err
 }
 
 // New create a new Certificate Authority
-func NewCA(commonName, parentCommonName string, identity Identity) (ca CA, err error) {
-	ca = CA{
+func NewCA(commonName string, parentCertificate *x509.Certificate, parentPrivateKey *rsa.PrivateKey, identity Identity) (ca *CA, err error) {
+	ca = &CA{
 		CommonName: commonName,
 	}
 
-	err = ca.create(commonName, parentCommonName, identity)
+	err = ca.create(commonName, parentCertificate, parentPrivateKey, identity)
 	if err != nil {
-		return ca, err
+		return nil, err
 	}
 
 	return ca, nil
@@ -100,23 +79,13 @@ func (c *CA) GetPrivateKey() string {
 }
 
 // GoPrivateKey returns the Private Key as Go bytes rsa.PrivateKey
-func (c *CA) GoPrivateKey() rsa.PrivateKey {
+func (c *CA) GoPrivateKey() *rsa.PrivateKey {
 	return c.Data.privateKey
 }
 
 // GoPublicKey returns the Public Key as Go bytes rsa.PublicKey
-func (c *CA) GoPublicKey() rsa.PublicKey {
+func (c *CA) GoPublicKey() *rsa.PublicKey {
 	return c.Data.publicKey
-}
-
-// GetCSR returns the Certificate Signing Request as string
-func (c *CA) GetCSR() string {
-	return c.Data.CSR
-}
-
-// GoCSR return the Certificate Signing Request as Go bytes *x509.CertificateRequest
-func (c *CA) GoCSR() *x509.CertificateRequest {
-	return c.Data.csr
 }
 
 // GetCertificate returns Certificate Authority Certificate as string
@@ -145,20 +114,15 @@ func (c *CA) IsIntermediate() bool {
 
 }
 
-// ListCertificates returns all certificates in the CA
-func (c *CA) ListCertificates() []string {
-	return storage.ListCertificates(c.CommonName)
-}
-
 // Status get details about Certificate Authority status.
 func (c *CA) Status() string {
-	if c.Data.CSR != "" && c.Data.Certificate == "" {
+	if c.Data.IsIntermediate && c.Data.Certificate == "" {
 		return "Intermediate Certificate Authority not ready, missing Certificate."
 
-	} else if c.Data.CSR != "" && c.Data.Certificate != "" {
+	} else if c.Data.IsIntermediate && c.Data.Certificate != "" {
 		return "Intermediate Certificate Authority is ready."
 
-	} else if c.Data.CSR == "" && c.Data.Certificate != "" {
+	} else if !c.Data.IsIntermediate && c.Data.Certificate != "" {
 		return "Certificate Authority is ready."
 
 	} else {
@@ -167,7 +131,7 @@ func (c *CA) Status() string {
 }
 
 // SignCSR perform a creation of certificate from a CSR (x509.CertificateRequest) and returns *x509.Certificate
-func (c *CA) SignCSR(csr x509.CertificateRequest, valid int) (certificate Certificate, err error) {
+func (c *CA) SignCSR(csr *x509.CertificateRequest, valid int) (certificate *Certificate, err error) {
 
 	certificate, err = c.signCSR(csr, valid)
 
@@ -178,33 +142,19 @@ func (c *CA) SignCSR(csr x509.CertificateRequest, valid int) (certificate Certif
 // IssueCertificate creates a new certificate
 //
 // It is import create an Identity{} with Certificate Client/Server information.
-func (c *CA) IssueCertificate(commonName string, id Identity) (certificate Certificate, err error) {
+func (c *CA) IssueCertificate(commonName string, id Identity) (certificate *Certificate, err error) {
 
 	certificate, err = c.issueCertificate(commonName, id)
 
 	return certificate, err
 }
 
-// LoadCertificate loads a certificate managed by the Certificate Authority
-//
-// The method ListCertificates can be used to list all available certificates.
-func (c *CA) LoadCertificate(commonName string) (certificate Certificate, err error) {
-	certificate, err = c.loadCertificate(commonName)
-
-	return certificate, err
-}
 
 // RevokeCertificate revokes a certificate managed by the Certificate Authority
-//
-// The method ListCertificates can be used to list all available certificates.
-func (c *CA) RevokeCertificate(commonName string) error {
+func (c *CA) RevokeCertificate(certificate *x509.Certificate) error {
 
-	certToRevoke, err := c.loadCertificate(commonName)
-	if err != nil {
-		return err
-	}
 
-	err = c.revokeCertificate(certToRevoke.certificate)
+	err := c.revokeCertificate(certificate)
 	if err != nil {
 		return err
 	}
@@ -222,8 +172,8 @@ func (c *Certificate) GetCertificate() string {
 }
 
 // GoCert returns the certificate as Go x509.Certificate.
-func (c *Certificate) GoCert() x509.Certificate {
-	return *c.certificate
+func (c *Certificate) GoCert() *x509.Certificate {
+	return c.certificate
 }
 
 // GetCSR returns the certificate as string.
@@ -232,7 +182,7 @@ func (c *Certificate) GetCSR() string {
 }
 
 // GoCSR returns the certificate as Go x509.Certificate.
-func (c *Certificate) GoCSR() x509.CertificateRequest {
+func (c *Certificate) GoCSR() *x509.CertificateRequest {
 	return c.csr
 }
 
@@ -242,6 +192,6 @@ func (c *Certificate) GetCACertificate() string {
 }
 
 // GoCACertificate returns the certificate *x509.Certificate.
-func (c *Certificate) GoCACertificate() x509.Certificate {
-	return *c.caCertificate
+func (c *Certificate) GoCACertificate() *x509.Certificate {
+	return c.caCertificate
 }

@@ -30,24 +30,22 @@
 package key
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/pem"
-
-	storage "github.com/kairoaraujo/goca/_storage"
 )
 
 // KeysData represents the RSA keys with Private Key (Key) and Public Key (Public Key).
 type KeysData struct {
-	Key       rsa.PrivateKey
-	PublicKey rsa.PublicKey
+	Key       *rsa.PrivateKey
+	PublicKey *rsa.PublicKey
 }
 
 // CreateKeys creates RSA private and public keyData that contains Key and PublicKey.
-//
-// The files are stored in the $CAPATH
-func CreateKeys(CACommonName, commonName string, creationType storage.CreationType, bitSize int) (KeysData, error) {
+func CreateKeys(CACommonName, commonName string, bitSize int) (KeysData, error) {
 	reader := rand.Reader
 	if bitSize == 0 {
 		bitSize = 2048
@@ -59,46 +57,61 @@ func CreateKeys(CACommonName, commonName string, creationType storage.CreationTy
 		return KeysData{}, err
 	}
 
-	publicKey := key.PublicKey
-
-	fileData := storage.File{
-		CA:             CACommonName,
-		CommonName:     commonName,
-		FileType:       storage.FileTypeKey,
-		PrivateKeyData: key,
-		PublicKeyData:  publicKey,
-		CreationType:   creationType,
-	}
-
-	err = storage.SaveFile(fileData)
-	if err != nil {
-		return KeysData{}, err
-	}
-
 	keys := KeysData{
-		Key:       *key,
-		PublicKey: publicKey,
+		Key:       key,
+		PublicKey: &key.PublicKey,
 	}
 
 	return keys, nil
 }
 
-// LoadPrivateKey loads a RSA Private Key from a read file.
-//
-// Using ioutil.ReadFile() satisfyies it.
-func LoadPrivateKey(keyString []byte) (*rsa.PrivateKey, error) {
-	block, _ := pem.Decode([]byte(string(keyString)))
+// LoadPrivateKey loads a RSA Private Key from a pem contend.
+func LoadPrivateKeyFromPem(keyPem []byte) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(string(keyPem)))
 	privateKey, _ := x509.ParsePKCS1PrivateKey(block.Bytes)
 
 	return privateKey, nil
 }
 
-// LoadPublicKey loads a RSA Public Key from a read file.
-//
-// Using ioutil.ReadFile() satisfyies it.
-func LoadPublicKey(keyString []byte) (*rsa.PublicKey, error) {
-	block, _ := pem.Decode([]byte(string(keyString)))
+// LoadPublicKey loads a RSA Public Key from a pem contend.
+func LoadPublicKeyFromPem(keyPem []byte) (*rsa.PublicKey, error) {
+	block, _ := pem.Decode([]byte(string(keyPem)))
 	publicKey, _ := x509.ParsePKCS1PublicKey(block.Bytes)
 
 	return publicKey, nil
+}
+
+// ConvertPrivateKeyFromDerToPem permit to convert private key from DER format to PEM format
+func ConvertPrivateKeyFromDerToPem(privateKey *rsa.PrivateKey) (privateKeyPem []byte, err error) {
+	pemPrivateKey := &pem.Block{
+		Type:  "PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	}
+	var pemBuff bytes.Buffer
+	err = pem.Encode(&pemBuff, pemPrivateKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return pemBuff.Bytes(), nil
+}
+
+// ConvertPrivateKeyFromDerToPem permit to convert public key from DER format to PEM format
+func ConvertPublicKeyFromDerToPem(publicKey *rsa.PublicKey) (publicKeyPem []byte, err error) {
+	
+	asn1Bytes, err := asn1.Marshal(publicKey)
+	if err != nil {
+		return nil, err
+	}
+	pemPublickey := &pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: asn1Bytes,
+	}
+	var pemBuff bytes.Buffer
+	err = pem.Encode(&pemBuff, pemPublickey)
+	if err != nil {
+		return nil, err
+	}
+
+	return pemBuff.Bytes(), nil
 }

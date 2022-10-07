@@ -1,5 +1,6 @@
 package goca_test
 
+/*
 import (
 	"fmt"
 	"log"
@@ -62,3 +63,4 @@ func Example_minimal() {
 	// Shows all CA Certificates
 	fmt.Println(RootCA.ListCertificates())
 }
+*/
