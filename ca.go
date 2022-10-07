@@ -5,12 +5,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
-	"errors"
 	"net"
 	"time"
 
 	"github.com/disaster37/goca/cert"
 	"github.com/disaster37/goca/key"
+	"github.com/pkg/errors"
 )
 
 
@@ -70,17 +70,17 @@ func (c *CA) create(commonName string, parentCertificate *x509.Certificate, pare
 
 	caKeys, err := key.CreateKeys(commonName, commonName, id.KeyBitSize)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error when create keys")
 	}
 
 	privateKeyPem, err := key.ConvertPrivateKeyFromDerToPem(caKeys.Key)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error when convert private key to PEM")
 	}
 
 	publicKeyPem, err := key.ConvertPublicKeyFromDerToPem(caKeys.PublicKey)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error when convert public key to PEM")
 	}
 
 	caData.privateKey = caKeys.Key
@@ -132,33 +132,33 @@ func (c *CA) create(commonName string, parentCertificate *x509.Certificate, pare
 		)
 	}
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error when create CA certificate")
 	}
 	certificate, err := x509.ParseCertificate(certBytes)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error parse CA certificate")
 	}
 	caData.certificate = certificate
 
 	crtPem, err := cert.ConvertCertificateFromDerToPem(certBytes)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error when convert CA certificate to PEM")
 	}
 	caData.Certificate = string(crtPem)
 	
 	crlBytes, err := cert.RevokeCertificate(c.CommonName, []pkix.RevokedCertificate{}, certificate, caKeys.Key)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error when create CRL")
 	}
 	crl, err := x509.ParseCRL(crlBytes)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error when parse CRL")
 	}
 	caData.crl = crl
 
 	crlPem, err := cert.ConvertCRLFromDerToPem(crlBytes)
 	if err != nil {
-		return err
+		return errors.Wrap(err, "Error when convert CRL to PEM")
 	}
 	caData.CRL = string(crlPem)
 

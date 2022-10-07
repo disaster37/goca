@@ -99,7 +99,7 @@ func ConvertPrivateKeyFromDerToPem(privateKey *rsa.PrivateKey) (privateKeyPem []
 // ConvertPrivateKeyFromDerToPem permit to convert public key from DER format to PEM format
 func ConvertPublicKeyFromDerToPem(publicKey *rsa.PublicKey) (publicKeyPem []byte, err error) {
 	
-	asn1Bytes, err := asn1.Marshal(publicKey)
+	asn1Bytes, err := asn1.Marshal(*publicKey)
 	if err != nil {
 		return nil, err
 	}
