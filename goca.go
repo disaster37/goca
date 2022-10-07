@@ -17,10 +17,12 @@
 package goca
 
 import (
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 
+	"software.sslmate.com/src/go-pkcs12"
 )
 
 // CA represents the basic CA data
@@ -37,7 +39,6 @@ type Certificate struct {
 	PrivateKey    string                  `json:"private_key" example:"-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----\n"`         // Certificate Private Key string
 	PublicKey     string                  `json:"public_key" example:"-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----\n"`            // Certificate Public Key string
 	CACertificate string                  `json:"ca_certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`      // CA Certificate as string
-	Pkcs12  			[]byte									`json:"pkcs12" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`      // Certificate Private Key on format PKCS8 string
 	privateKey    *rsa.PrivateKey          // Certificate Private Key object rsa.PrivateKey
 	publicKey     *rsa.PublicKey           // Certificate Private Key object rsa.PublicKey
 	csr           *x509.CertificateRequest // Certificate Sigining Request object x509.CertificateRequest
@@ -195,4 +196,13 @@ func (c *Certificate) GetCACertificate() string {
 // GoCACertificate returns the certificate *x509.Certificate.
 func (c *Certificate) GoCACertificate() *x509.Certificate {
 	return c.caCertificate
+}
+
+
+func GeneratePkcs12(certificate *Certificate, passphrase string, otherCaCerts ...*x509.Certificate) (pfxData []byte, err error) {
+	cas := []*x509.Certificate{certificate.caCertificate}
+	if len(otherCaCerts) > 0 {
+		cas = append(cas, otherCaCerts...)
+	}
+	return pkcs12.Encode(rand.Reader, certificate.privateKey, certificate.certificate, []*x509.Certificate{certificate.caCertificate}, passphrase)
 }

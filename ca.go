@@ -1,7 +1,6 @@
 package goca
 
 import (
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -12,7 +11,6 @@ import (
 	"github.com/disaster37/goca/cert"
 	"github.com/disaster37/goca/key"
 	"github.com/pkg/errors"
-	"software.sslmate.com/src/go-pkcs12" 
 )
 
 // A Identity represents the Certificate Authority Identity Information
@@ -316,11 +314,7 @@ func (c *CA) issueCertificate(commonName string, id Identity) (certificate *Cert
 	}
 	certificate.Certificate = string(certificatePem)
 
-	pkcs12, err := pkcs12.Encode(rand.Reader, certKeys.Key, crt, []*x509.Certificate{certificate.caCertificate}, "")
-	if err != nil {
-		return nil, err
-	}
-	certificate.Pkcs12 = pkcs12
+	
 
 	return certificate, nil
 
