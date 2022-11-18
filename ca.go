@@ -289,7 +289,10 @@ func (c *CA) issueCertificate(commonName string, id Identity) (certificate *Cert
 		return nil, err
 	}
 
-	csr, _ := x509.ParseCertificateRequest(csrBytes)
+	csr, err := x509.ParseCertificateRequest(csrBytes)
+	if err != nil {
+		return nil, err
+	}
 	csrPem, err := cert.ConvertCSRFromDerToPem(csrBytes)
 	if err != nil {
 		return nil, err

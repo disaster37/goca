@@ -204,5 +204,5 @@ func GeneratePkcs12(certificate *Certificate, passphrase string, otherCaCerts ..
 	if len(otherCaCerts) > 0 {
 		cas = append(cas, otherCaCerts...)
 	}
-	return pkcs12.Encode(rand.Reader, certificate.privateKey, certificate.certificate, []*x509.Certificate{certificate.caCertificate}, passphrase)
+	return pkcs12.Encode(rand.Reader, certificate.privateKey, certificate.certificate, cas, passphrase)
 }
