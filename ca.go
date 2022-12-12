@@ -273,6 +273,11 @@ func (c *CA) issueCertificate(commonName string, id Identity) (certificate *Cert
 		return nil, err
 	}
 
+	rsaPrivateKeyPem, err := key.ConvertRsaPrivateKeyFromDerToPem(certKeys.Key)
+	if err != nil {
+		return nil, err
+	}
+
 	publicKeyPem, err := key.ConvertPublicKeyFromDerToPem(certKeys.PublicKey)
 	if err != nil {
 		return nil, err
@@ -281,6 +286,7 @@ func (c *CA) issueCertificate(commonName string, id Identity) (certificate *Cert
 
 	certificate.privateKey = certKeys.Key
 	certificate.PrivateKey = string(privateKeyPem)
+	certificate.RsaPrivateKey = string(rsaPrivateKeyPem)
 	certificate.publicKey = certKeys.PublicKey
 	certificate.PublicKey = string(publicKeyPem)
 

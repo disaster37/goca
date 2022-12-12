@@ -96,6 +96,21 @@ func ConvertPrivateKeyFromDerToPem(privateKey *rsa.PrivateKey) (privateKeyPem []
 	return pemBuff.Bytes(), nil
 }
 
+// ConvertRsaPrivateKeyFromDerToPem permit to convert private key from DER format to PEM format
+func ConvertRsaPrivateKeyFromDerToPem(privateKey *rsa.PrivateKey) (rsaPrivateKeyPem []byte, err error) {
+	pemRsaPrivateKey := &pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(privateKey),
+	}
+	var pemBuff bytes.Buffer
+	err = pem.Encode(&pemBuff, pemRsaPrivateKey)
+	if err != nil {
+		return nil, err
+	}
+
+	return pemBuff.Bytes(), nil
+}
+
 // ConvertPrivateKeyFromDerToPem permit to convert public key from DER format to PEM format
 func ConvertPublicKeyFromDerToPem(publicKey *rsa.PublicKey) (publicKeyPem []byte, err error) {
 	
