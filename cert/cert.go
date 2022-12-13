@@ -89,7 +89,7 @@ func CreateCSR(CACommonName, commonName, country, province, locality, organizati
 		RawSubject:         asn1Subj,
 		EmailAddresses:     []string{emailAddresses},
 		SignatureAlgorithm: x509.SHA256WithRSA,
-		IPAddresses: ipAddresses,
+		IPAddresses:        ipAddresses,
 	}
 
 	dnsNames = append(dnsNames, commonName)
@@ -118,7 +118,6 @@ func LoadCSRFromPem(csrPem []byte) (*x509.CertificateRequest, error) {
 	return csr, nil
 }
 
-
 // LoadCRL loads a Certificate Revocation List from a pem contend.
 func LoadCRLFromPem(crlPem []byte) (*pkix.CertificateList, error) {
 	block, _ := pem.Decode(crlPem)
@@ -126,7 +125,6 @@ func LoadCRLFromPem(crlPem []byte) (*pkix.CertificateList, error) {
 
 	return crl, nil
 }
-
 
 // CreateRootCert creates a Root CA Certificate (self-signed)
 func CreateRootCert(
@@ -205,7 +203,7 @@ func CreateCACert(
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
-		IPAddresses: ipAddresses,
+		IPAddresses:           ipAddresses,
 	}
 	dnsNames = append(dnsNames, commonName)
 	caCert.DNSNames = dnsNames
@@ -219,7 +217,7 @@ func CreateCACert(
 		signingCertificate = parentCertificate
 	}
 	return x509.CreateCertificate(rand.Reader, caCert, signingCertificate, publicKey, signingPrivateKey)
-	
+
 }
 
 // LoadCert loads a certifiate from a pem contend.
@@ -263,9 +261,9 @@ func CASignCSR(CACommonName string, csr *x509.CertificateRequest, caCert *x509.C
 		NotBefore:    time.Now(),
 		NotAfter:     time.Now().AddDate(0, 0, valid),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		DNSNames: csr.DNSNames,
-		IPAddresses: csr.IPAddresses,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		DNSNames:     csr.DNSNames,
+		IPAddresses:  csr.IPAddresses,
 	}
 
 	return x509.CreateCertificate(rand.Reader, csrTemplate, caCert, csrTemplate.PublicKey, privKey)
