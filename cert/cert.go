@@ -223,7 +223,13 @@ func CreateCACert(
 // LoadCert loads a certifiate from a pem contend.
 func LoadCertFromPem(certString []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(string(certString)))
-	cert, _ := x509.ParseCertificate(block.Bytes)
+	if block == nil {
+		return nil, errors.New("Error when decode certificate")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, errors.Wrap(err, "Error when parse certificate")
+	}
 	return cert, nil
 }
 
