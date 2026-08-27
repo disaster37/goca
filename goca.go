@@ -1,27 +1,18 @@
-// Package goca provides Certificate Authority (CA) framework managing
+// Package goca provides Certificate Authority (CA) framework for Go.
 //
-// GoCA is an API Framework that uses mainly crypto/x509 to manage
-// Certificate Authorities.
+// GoCA is a pure library on top of crypto/x509 to manage Certificate
+// Authorities, issue certificates, sign Certificate Signing Requests (CSR),
+// revoke certificates (CRL), and export PKCS#12 bundles.
 //
-// Using GoCA makes easy to create a CA and issue certificates, signing
-// Certificates Signing Request (CSR) and revoke certificate generating
-// Certificates Request List (CRL).
-//
-// All files are stored in the “$CAPATH“. The “$CAPATH“ is an environment
-// variable the defines were all files (keys, certificates, etc) will be stored.
-// It is importante to have this folder in a safety place.
-//
-// GoCA also make easier manipulate files such as Private and Public Keys,
-// Certificate Signing Request, Certificate Request Lists and Certificates
-// for other Go applications.
+// GoCA does not touch the filesystem. The caller is responsible for
+// persisting and loading PEM-encoded keys, certificates, and CRLs.
 package goca
 
 import (
-	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"crypto/x509/pkix"
 
+	"github.com/pkg/errors"
 	"software.sslmate.com/src/go-pkcs12"
 )
 
@@ -33,31 +24,32 @@ type CA struct {
 
 // Certificate represents a Certificate data
 type Certificate struct {
-	commonName    string                  // Certificate Common Name
-	Certificate   string                  `json:"certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`         // Certificate certificate string
-	CSR           string                  `json:"csr" example:"-----BEGIN CERTIFICATE REQUEST-----...-----END CERTIFICATE REQUEST-----\n"` // Certificate Signing Request string
-	RsaPrivateKey string                  `json:"rsa_private_key" example:"-----BEGIN RSA PRIVATE KEY-----...-----END RSA PRIVATE KEY-----\n"` // Certificate Private Key string
-	PrivateKey    string                  `json:"private_key" example:"-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----\n"`         // Certificate Private Key string
-	PublicKey     string                  `json:"public_key" example:"-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----\n"`            // Certificate Public Key string
-	CACertificate string                  `json:"ca_certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`      // CA Certificate as string
+	commonName    string                   // Certificate Common Name
+	Certificate   string                   `json:"certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`             // Certificate certificate string
+	CSR           string                   `json:"csr" example:"-----BEGIN CERTIFICATE REQUEST-----...-----END CERTIFICATE REQUEST-----\n"`     // Certificate Signing Request string
+	RsaPrivateKey string                   `json:"rsa_private_key" example:"-----BEGIN RSA PRIVATE KEY-----...-----END RSA PRIVATE KEY-----\n"` // Certificate Private Key string
+	PrivateKey    string                   `json:"private_key" example:"-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----\n"`             // Certificate Private Key string
+	PublicKey     string                   `json:"public_key" example:"-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----\n"`                // Certificate Public Key string
+	CACertificate string                   `json:"ca_certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`          // CA Certificate as string
 	privateKey    *rsa.PrivateKey          // Certificate Private Key object rsa.PrivateKey
 	publicKey     *rsa.PublicKey           // Certificate Private Key object rsa.PublicKey
 	csr           *x509.CertificateRequest // Certificate Sigining Request object x509.CertificateRequest
-	certificate   *x509.Certificate       // Certificate certificate *x509.Certificate
-	caCertificate *x509.Certificate       // CA Certificate *x509.Certificate
+	certificate   *x509.Certificate        // Certificate certificate *x509.Certificate
+	caCertificate *x509.Certificate        // CA Certificate *x509.Certificate
+	certType      string
 }
 
 //
 // Certificate Authority
 //
 
-// New creat new Certificate Authority
+// New creates a new Root Certificate Authority
 func New(commonName string, identity Identity) (ca *CA, err error) {
 	ca, err = NewCA(commonName, nil, nil, identity)
 	return ca, err
 }
 
-// New create a new Certificate Authority
+// NewCA creates a new Root or Intermediate Certificate Authority
 func NewCA(commonName string, parentCertificate *x509.Certificate, parentPrivateKey *rsa.PrivateKey, identity Identity) (ca *CA, err error) {
 	ca = &CA{
 		CommonName: commonName,
@@ -106,8 +98,8 @@ func (c *CA) GetCRL() string {
 	return c.Data.CRL
 }
 
-// GoCRL returns Certificate Revocation List as Go bytes *pkix.CertificateList
-func (c *CA) GoCRL() *pkix.CertificateList {
+// GoCRL returns the Certificate Revocation List as *x509.RevocationList.
+func (c *CA) GoCRL() *x509.RevocationList {
 	return c.Data.crl
 }
 
@@ -133,13 +125,20 @@ func (c *CA) Status() string {
 	}
 }
 
-// SignCSR perform a creation of certificate from a CSR (x509.CertificateRequest) and returns *x509.Certificate
+// SignCSR creates a certificate from a CSR (x509.CertificateRequest).
+//
+// Deprecated: use SignCSRWithType, which lets you choose the certificate type.
+// This overload uses the historical default type ("server-client").
 func (c *CA) SignCSR(csr *x509.CertificateRequest, valid int) (certificate *Certificate, err error) {
+	return c.SignCSRWithType(csr, valid, "")
+}
 
-	certificate, err = c.signCSR(csr, valid)
-
-	return certificate, err
-
+// SignCSRWithType creates a certificate from a CSR with an explicit
+// certificate type. certType accepts the values documented on
+// cert.ParseCertType (e.g. "server", "client", "email"). An empty string uses
+// the historical default.
+func (c *CA) SignCSRWithType(csr *x509.CertificateRequest, valid int, certType string) (certificate *Certificate, err error) {
+	return c.signCSR(csr, valid, certType)
 }
 
 // IssueCertificate creates a new certificate
@@ -152,17 +151,9 @@ func (c *CA) IssueCertificate(commonName string, id Identity) (certificate *Cert
 	return certificate, err
 }
 
-
 // RevokeCertificate revokes a certificate managed by the Certificate Authority
 func (c *CA) RevokeCertificate(certificate *x509.Certificate) error {
-
-
-	err := c.revokeCertificate(certificate)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return c.revokeCertificate(certificate)
 }
 
 //
@@ -199,11 +190,38 @@ func (c *Certificate) GoCACertificate() *x509.Certificate {
 	return c.caCertificate
 }
 
+// Type returns the certificate type string (e.g. "server", "client").
+// Returns "" for certificates created before the Type field existed.
+func (c *Certificate) Type() string {
+	return c.certType
+}
 
-func GeneratePkcs12(certificate *Certificate, passphrase string, otherCaCerts ...*x509.Certificate) (pfxData []byte, err error) {
+// GeneratePKCS12 encodes a Certificate (with its CA chain) into a PKCS#12
+// bundle using the modern 2023 encryption profile (PBES2/AES-256-CBC +
+// HMAC-SHA-256). The passphrase must be non-empty.
+func GeneratePKCS12(certificate *Certificate, passphrase string, otherCaCerts ...*x509.Certificate) (pfxData []byte, err error) {
+	if certificate == nil {
+		return nil, errors.New("certificate is nil")
+	}
+	if certificate.privateKey == nil || certificate.certificate == nil {
+		return nil, errors.New("certificate is missing its private key or certificate")
+	}
+	if passphrase == "" {
+		return nil, errors.New("passphrase is required for PKCS#12 encoding")
+	}
+
 	cas := []*x509.Certificate{certificate.caCertificate}
 	if len(otherCaCerts) > 0 {
 		cas = append(cas, otherCaCerts...)
 	}
-	return pkcs12.Encode(rand.Reader, certificate.privateKey, certificate.certificate, cas, passphrase)
+
+	encoder := pkcs12.Modern2023
+	return encoder.Encode(certificate.privateKey, certificate.certificate, cas, passphrase)
+}
+
+// GeneratePkcs12 is kept for backward compatibility.
+//
+// Deprecated: use GeneratePKCS12, which uses modern PKCS#12 encryption.
+func GeneratePkcs12(certificate *Certificate, passphrase string, otherCaCerts ...*x509.Certificate) (pfxData []byte, err error) {
+	return GeneratePKCS12(certificate, passphrase, otherCaCerts...)
 }

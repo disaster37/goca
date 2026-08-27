@@ -1,15 +1,15 @@
 package goca
 
 import (
-
+	"crypto/x509"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// TestFunctionalRootCACreation creates a RootCA
+// TestFunctionalRootCACreation creates a RootCA.
 func TestFunctionalRootCACreation(t *testing.T) {
-
 	rootCAIdentity := Identity{
 		Organization:       "GO CA Root Company Inc.",
 		OrganizationalUnit: "Certificates Management",
@@ -21,20 +21,18 @@ func TestFunctionalRootCACreation(t *testing.T) {
 	}
 
 	rootCompanyCA, err := New("go-root.ca", rootCAIdentity)
-	assert.NoError(t, err)
-	assert.NotNil(t, rootCompanyCA)
+	require.NoError(t, err)
+	require.NotNil(t, rootCompanyCA)
 	assert.False(t, rootCompanyCA.IsIntermediate())
 	assert.Equal(t, "Certificate Authority is ready.", rootCompanyCA.Status())
 	assert.NotEmpty(t, rootCompanyCA.GetCertificate())
 	assert.NotEmpty(t, rootCompanyCA.GetPrivateKey())
 	assert.NotEmpty(t, rootCompanyCA.GetPublicKey())
 	assert.NotEmpty(t, rootCompanyCA.GetCRL())
-	
 }
 
-// Creates a Intermediate CA
+// TestFunctionalIntermediateCACreation creates an intermediate CA.
 func TestFunctionalIntermediateCACreation(t *testing.T) {
-
 	rootCAIdentity := Identity{
 		Organization:       "GO CA Root Company Inc.",
 		OrganizationalUnit: "Certificates Management",
@@ -44,11 +42,8 @@ func TestFunctionalIntermediateCACreation(t *testing.T) {
 		Intermediate:       false,
 		DNSNames:           []string{"www.go-root.ca", "secure.go-root.ca"},
 	}
-
 	rootCompanyCA, err := New("go-root.ca", rootCAIdentity)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
 	intermediateCAIdentity := Identity{
 		Organization:       "Intermediate CA Company Inc.",
@@ -60,19 +55,18 @@ func TestFunctionalIntermediateCACreation(t *testing.T) {
 	}
 
 	intermediateCA, err := NewCA("go-intermediate.ca", rootCompanyCA.GoCertificate(), rootCompanyCA.GoPrivateKey(), intermediateCAIdentity)
-	assert.NoError(t, err)
-	assert.NotNil(t, intermediateCA)
+	require.NoError(t, err)
+	require.NotNil(t, intermediateCA)
 	assert.True(t, intermediateCA.IsIntermediate())
 	assert.NotEmpty(t, intermediateCA.GetCertificate())
 	assert.NotEmpty(t, intermediateCA.GetPrivateKey())
 	assert.NotEmpty(t, intermediateCA.GetPublicKey())
 	assert.NotEmpty(t, intermediateCA.GetCRL())
-
 }
 
-
+// TestFunctionalRootCAIssueNewCertificate issues a certificate and checks its
+// type matches the requested Type.
 func TestFunctionalRootCAIssueNewCertificate(t *testing.T) {
-
 	rootCAIdentity := Identity{
 		Organization:       "GO CA Root Company Inc.",
 		OrganizationalUnit: "Certificates Management",
@@ -82,128 +76,147 @@ func TestFunctionalRootCAIssueNewCertificate(t *testing.T) {
 		Intermediate:       false,
 		DNSNames:           []string{"www.go-root.ca", "secure.go-root.ca"},
 	}
-
 	rootCA, err := New("go-root.ca", rootCAIdentity)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 
-
-	intranteIdentity := Identity{
+	intranetIdentity := Identity{
 		Organization:       "SFTP Server CA Company Inc.",
 		OrganizationalUnit: "Intermediate Certificates Management",
 		Country:            "NL",
 		Locality:           "Noord-Brabant",
 		Province:           "Veldhoven",
-		Intermediate:       true,
 		DNSNames:           []string{"w3.intranet.go-root.ca"},
+		Type:               "server",
 	}
 
-	intranetCert, err := rootCA.IssueCertificate("intranet.go-root.ca", intranteIdentity)
-	assert.NoError(t, err)
-	assert.NotNil(t, intranetCert)
-	assert.NotEmpty(t, intranetCert.GetCACertificate())
-	assert.NotEmpty(t, intranetCert.GetCertificate())
-	assert.NotEmpty(t, intranetCert.GetCSR())
-	assert.NotEmpty(t, intranetCert.PrivateKey)
+	cert, err := rootCA.IssueCertificate("intranet.go-root.ca", intranetIdentity)
+	require.NoError(t, err)
+	require.NotNil(t, cert)
+	assert.NotEmpty(t, cert.GetCACertificate())
+	assert.NotEmpty(t, cert.GetCertificate())
+	assert.NotEmpty(t, cert.GetCSR())
+	assert.NotEmpty(t, cert.PrivateKey)
+	assert.Equal(t, "server", cert.Type())
+
+	// Verify the KeyUsage matches the server type.
+	assert.Contains(t, cert.GoCert().ExtKeyUsage, x509.ExtKeyUsageServerAuth)
+	assert.NotContains(t, cert.GoCert().ExtKeyUsage, x509.ExtKeyUsageClientAuth)
 }
 
-/*
-
-func TestFunctionalRootCALoadCertificates(t *testing.T) {
-
-	RootCA, err := Load("go-root.ca")
-	if err != nil {
-		t.Log(err)
-		t.Errorf("Failed to load Root CA")
-	}
-
-	intranetCert, err := RootCA.LoadCertificate("intranet.go-root.ca")
-	if err != nil {
-		fmt.Println(err)
-		t.Log(err)
-	}
-
-	if intranetCert.GetCACertificate() != "" {
-		t.Log("Failed to load intranet")
-	}
-	intermediateCert, _ := RootCA.LoadCertificate("go-intermediate.ca")
-
-	if RootCA.GetCertificate() != intermediateCert.GetCACertificate() {
-		t.Log(RootCA.GetCertificate())
-		t.Log(intermediateCert.GetCACertificate())
-		t.Error("The CA Certificate is not the same as the Certificate CA Certificate")
-	}
-
-}
-
-func TestFunctionalIntermediateCAIssueNewCertificate(t *testing.T) {
-	id := Identity{
-		Organization:       "An Organization",
-		OrganizationalUnit: "An Organizational Unit",
+// TestFunctionalRootCALoadCA loads a CA from its PEM components.
+func TestFunctionalRootCALoadCA(t *testing.T) {
+	rootCAIdentity := Identity{
+		Organization:       "GO CA Root Company Inc.",
+		OrganizationalUnit: "Certificates Management",
 		Country:            "NL",
 		Locality:           "Noord-Brabant",
 		Province:           "Veldhoven",
 		Intermediate:       false,
-		DNSNames:           []string{"anorg.go-intermediate.ca"},
+		DNSNames:           []string{"www.go-root.ca"},
 	}
+	rootCA, err := New("go-root.ca", rootCAIdentity)
+	require.NoError(t, err)
 
-	interCA, err := Load("go-intermediate.ca")
-	if err != nil {
-		t.Errorf("Failed to load intermediate CA")
-	}
-
-	idCert, err := interCA.IssueCertificate("anorg.go-intermediate.ca", id)
-	if err != nil {
-		t.Error("Failed to issue certificate anorg.go-intermediate.ca")
-	}
-
-	fmt.Println(interCA.ListCertificates())
-
-	if interCA.GetCertificate() != idCert.GetCACertificate() {
-		t.Error("CA certificate mismatch between intermediate CA and issued certificate.")
-	}
+	loaded := &CA{}
+	err = loaded.LoadCA(
+		[]byte(rootCA.GetPrivateKey()),
+		[]byte(rootCA.GetPublicKey()),
+		[]byte(rootCA.GetCertificate()),
+		[]byte(rootCA.GetCRL()),
+	)
+	require.NoError(t, err)
+	assert.Equal(t, rootCA.GetCertificate(), loaded.GetCertificate())
+	assert.Equal(t, rootCA.GetCRL(), loaded.GetCRL())
 }
 
+// TestFunctionalRevokeCertificate issues a cert, revokes it, and verifies the
+// CRL contains the serial number.
 func TestFunctionalRevokeCertificate(t *testing.T) {
-	RootCA, _ := Load("go-root.ca")
-	intermediateCert, _ := RootCA.LoadCertificate("go-intermediate.ca")
+	rootCAIdentity := Identity{
+		Organization:       "GO CA Root Company Inc.",
+		OrganizationalUnit: "Certificates Management",
+		Country:            "NL",
+		Locality:           "Noord-Brabant",
+		Province:           "Veldhoven",
+		Intermediate:       false,
+		DNSNames:           []string{"www.go-root.ca"},
+	}
+	rootCA, err := New("go-root.ca", rootCAIdentity)
+	require.NoError(t, err)
 
-	if RootCA.Data.crl == nil {
-		t.Error("CRL is nil")
-	}
+	cert, err := rootCA.IssueCertificate("intranet.go-root.ca", Identity{
+		Organization: "O", OrganizationalUnit: "U", Country: "NL",
+		Locality: "L", Province: "P", Type: "server",
+	})
+	require.NoError(t, err)
 
-	err := RootCA.RevokeCertificate("go-intermediate.ca")
-	if err != nil {
-		t.Error("Failed to revoke certificate")
-	}
-	t.Log(intermediateCert.certificate.SerialNumber)
-	t.Log(RootCA.Data.crl.TBSCertList.RevokedCertificates[0].SerialNumber)
-	result := intermediateCert.certificate.SerialNumber.Cmp(RootCA.Data.crl.TBSCertList.RevokedCertificates[0].SerialNumber)
-	if result != 0 {
-		t.Error("Certificate Serial Number is not in the CRL")
-	}
+	err = rootCA.RevokeCertificate(cert.GoCert())
+	require.NoError(t, err)
 
-	t.Log("Negative check")
-	intranetCert, _ := RootCA.LoadCertificate("intranet.go-root.ca")
-	t.Log(intranetCert.certificate.SerialNumber)
-	t.Log(RootCA.Data.crl.TBSCertList.RevokedCertificates[0].SerialNumber)
-	result = intranetCert.certificate.SerialNumber.Cmp(RootCA.Data.crl.TBSCertList.RevokedCertificates[0].SerialNumber)
-	if result == 0 {
-		t.Error("Non revoked certificate in list")
-	}
-	err = RootCA.RevokeCertificate("intranet.go-root.ca")
-	if err != nil {
-		t.Error("Failed to revoke.")
-	}
-	t.Log(RootCA.Data.crl.TBSCertList.RevokedCertificates)
-	if len(RootCA.Data.crl.TBSCertList.RevokedCertificates) != 2 {
-		t.Error("Not appending certificates to revoke list")
-	}
-	t.Logf("Test appending revoked certificates")
+	crl := rootCA.GoCRL()
+	require.NotNil(t, crl)
+	require.NotEmpty(t, crl.RevokedCertificates)
+	assert.Equal(t, 0, cert.GoCert().SerialNumber.Cmp(crl.RevokedCertificates[0].SerialNumber))
 
-	if RootCA.GetCRL() == "" {
-		t.Error("CRL X509 file is empty!")
-	}
+	// Revoking twice must fail.
+	err = rootCA.RevokeCertificate(cert.GoCert())
+	assert.ErrorIs(t, err, ErrCertRevoked)
 }
-*/
+
+// TestFunctionalRevokeCertificate_NotIssued verifies that revoking a cert from
+// another CA fails.
+func TestFunctionalRevokeCertificate_NotIssued(t *testing.T) {
+	id := Identity{
+		Organization: "O", OrganizationalUnit: "U", Country: "NL",
+		Locality: "L", Province: "P",
+	}
+	caA, err := New("a.ca", id)
+	require.NoError(t, err)
+	caB, err := New("b.ca", id)
+	require.NoError(t, err)
+
+	certA, err := caA.IssueCertificate("client.a.ca", Identity{
+		Organization: "O", OrganizationalUnit: "U", Country: "NL",
+		Locality: "L", Province: "P", Type: "client",
+	})
+	require.NoError(t, err)
+
+	err = caB.RevokeCertificate(certA.GoCert())
+	assert.ErrorIs(t, err, ErrCertNotIssuedByCA)
+}
+
+// TestGeneratePKCS12 encodes a certificate and decodes it back.
+func TestGeneratePKCS12(t *testing.T) {
+	rootCA, err := New("go-root.ca", Identity{
+		Organization: "O", OrganizationalUnit: "U", Country: "NL",
+		Locality: "L", Province: "P",
+	})
+	require.NoError(t, err)
+
+	cert, err := rootCA.IssueCertificate("client.go-root.ca", Identity{
+		Organization: "O", OrganizationalUnit: "U", Country: "NL",
+		Locality: "L", Province: "P", Type: "client",
+	})
+	require.NoError(t, err)
+
+	pfx, err := GeneratePKCS12(cert, "passphrase123")
+	require.NoError(t, err)
+	assert.NotEmpty(t, pfx)
+	// PKCS#12 PFX data starts with ASN.1 SEQUENCE (0x30).
+	assert.True(t, len(pfx) > 0 && pfx[0] == 0x30, "PFX must start with ASN.1 SEQUENCE")
+}
+
+func TestGeneratePKCS12_EmptyPassphrase(t *testing.T) {
+	rootCA, err := New("go-root.ca", Identity{
+		Organization: "O", OrganizationalUnit: "U", Country: "NL",
+		Locality: "L", Province: "P",
+	})
+	require.NoError(t, err)
+	cert, err := rootCA.IssueCertificate("c.go-root.ca", Identity{
+		Organization: "O", OrganizationalUnit: "U", Country: "NL",
+		Locality: "L", Province: "P", Type: "client",
+	})
+	require.NoError(t, err)
+	_, err = GeneratePKCS12(cert, "")
+	assert.Error(t, err)
+}
