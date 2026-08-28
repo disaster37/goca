@@ -29,6 +29,9 @@ package cert
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
@@ -56,12 +59,18 @@ const (
 	MaxValidCACert int = 3650
 	// DefaultValidCACert is the default valid time for a CA certificate: 3650 days (~10 years).
 	DefaultValidCACert int = 3650
+
+	// MinValidDuration is the minimal validity for duration-based issuance: 1 minute.
+	MinValidDuration = time.Minute
 )
 
 // ErrCertExists means that the certificate requested already exists
 var ErrCertExists = errors.New("certificate already exists")
 
 var ErrParentCANotFound = errors.New("parent CA not found")
+
+// ErrCSRSignatureInvalid means that the CSR signature verification failed.
+var ErrCSRSignatureInvalid = errors.New("CSR signature is invalid")
 
 // newSerialNumber returns a random positive serial number fitting in 128 bits.
 func newSerialNumber() (*big.Int, error) {
@@ -80,7 +89,7 @@ func newSerialNumber() (*big.Int, error) {
 // CreateCSR creates a Certificate Signing Request (DER bytes).
 // CACommonName is deprecated and ignored (kept for backward compatibility).
 // commonName is appended to dnsNames if not already present.
-func CreateCSR(CACommonName, commonName, country, province, locality, organization, organizationalUnit, emailAddresses string, dnsNames []string, ipAddresses []net.IP, priv *rsa.PrivateKey) (csrDer []byte, err error) {
+func CreateCSR(CACommonName, commonName, country, province, locality, organization, organizationalUnit, emailAddresses string, dnsNames []string, ipAddresses []net.IP, priv crypto.Signer) (csrDer []byte, err error) {
 	var oidEmailAddress = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 1}
 
 	subject := pkix.Name{
@@ -93,24 +102,37 @@ func CreateCSR(CACommonName, commonName, country, province, locality, organizati
 	}
 
 	rawSubj := subject.ToRDNSequence()
-	rawSubj = append(rawSubj, []pkix.AttributeTypeAndValue{
-		{Type: oidEmailAddress, Value: emailAddresses},
-	})
+	if emailAddresses != "" {
+		rawSubj = append(rawSubj, []pkix.AttributeTypeAndValue{
+			{Type: oidEmailAddress, Value: emailAddresses},
+		})
+	}
 	asn1Subj, err := asn1.Marshal(rawSubj)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to marshal CSR subject")
 	}
 	template := x509.CertificateRequest{
-		RawSubject:         asn1Subj,
-		EmailAddresses:     []string{emailAddresses},
-		SignatureAlgorithm: x509.SHA256WithRSA,
-		IPAddresses:        ipAddresses,
+		RawSubject:  asn1Subj,
+		IPAddresses: ipAddresses,
+	}
+	if emailAddresses != "" {
+		template.EmailAddresses = []string{emailAddresses}
 	}
 
-	// Build a new slice to avoid mutating the caller's dnsNames.
+	// Build a new slice to avoid mutating the caller's dnsNames and append
+	// the commonName only if it is not already present (dedupe).
 	allDNS := make([]string, 0, len(dnsNames)+1)
 	allDNS = append(allDNS, dnsNames...)
-	allDNS = append(allDNS, commonName)
+	present := false
+	for _, dns := range dnsNames {
+		if dns == commonName {
+			present = true
+			break
+		}
+	}
+	if !present {
+		allDNS = append(allDNS, commonName)
+	}
 	template.DNSNames = allDNS
 
 	return x509.CreateCertificateRequest(rand.Reader, &template, priv)
@@ -173,8 +195,8 @@ func CreateRootCert(
 	valid int,
 	dnsNames []string,
 	ipAddresses []net.IP,
-	privateKey *rsa.PrivateKey,
-	publicKey *rsa.PublicKey,
+	privateKey crypto.Signer,
+	publicKey crypto.PublicKey,
 ) (certDer []byte, err error) {
 	certDer, err = CreateCACert(
 		CACommonName,
@@ -212,10 +234,10 @@ func CreateCACert(
 	validDays int,
 	dnsNames []string,
 	ipAddresses []net.IP,
-	privateKey,
-	parentPrivateKey *rsa.PrivateKey,
+	privateKey crypto.Signer,
+	parentPrivateKey crypto.Signer,
 	parentCertificate *x509.Certificate,
-	publicKey *rsa.PublicKey) (certDer []byte, err error) {
+	publicKey crypto.PublicKey) (certDer []byte, err error) {
 	if validDays == 0 {
 		validDays = DefaultValidCACert
 	}
@@ -244,14 +266,22 @@ func CreateCACert(
 		NotBefore:             time.Now().Add(-time.Minute * 10),
 		NotAfter:              time.Now().AddDate(0, 0, validDays),
 		IsCA:                  true,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 		BasicConstraintsValid: true,
 		IPAddresses:           ipAddresses,
 	}
 	allDNS := make([]string, 0, len(dnsNames)+1)
 	allDNS = append(allDNS, dnsNames...)
-	allDNS = append(allDNS, commonName)
+	present := false
+	for _, dns := range dnsNames {
+		if dns == commonName {
+			present = true
+			break
+		}
+	}
+	if !present {
+		allDNS = append(allDNS, commonName)
+	}
 	caCert.DNSNames = allDNS
 
 	signingPrivateKey := privateKey
@@ -294,23 +324,76 @@ func ConvertCertificateFromDerToPem(certDer []byte) (certPem []byte, err error) 
 	return pemBuff.Bytes(), nil
 }
 
-// CASignCSR signs a Certificate Signing Request and returns the certificate
-// DER bytes.
-//
-// certType controls the KeyUsage/ExtKeyUsage of the issued certificate. It
-// accepts the same values as ParseCertType (e.g. "server", "client",
-// "email", "code-signing"). An empty string uses the historical default
-// ("server-client") for backward compatibility.
+// SignOptions controls how a CSR is signed into an end-entity certificate.
+type SignOptions struct {
+	// ValidDays is the validity in days (1..3650). 0 = DefaultValidCert.
+	// Ignored when ValidDuration > 0.
+	ValidDays int
+	// ValidDuration is a duration-based validity. Overrides ValidDays when
+	// > 0. Clamped between MinValidDuration and MaxValidCert days.
+	ValidDuration time.Duration
+	// CertType selects KeyUsage/ExtKeyUsage (see ParseCertType).
+	// Empty = DefaultCertType ("server-client").
+	CertType string
+	// NotBefore sets the certificate validity start explicitly. Zero =
+	// computed from now and Backdate.
+	NotBefore time.Time
+	// Backdate shifts NotBefore into the past (clock-skew tolerance) when
+	// NotBefore is zero. Never earlier than the CA's own NotBefore.
+	Backdate time.Duration
+}
+
+// CASignCSRWithOptions signs a CSR with full control over validity window
+// and certificate type. The leaf NotAfter is clamped to the CA's NotAfter.
 //
 // CACommonName is deprecated and ignored (kept for backward compatibility).
-func CASignCSR(CACommonName string, csr *x509.CertificateRequest, caCert *x509.Certificate, privKey *rsa.PrivateKey, valid int, certType string) (certDer []byte, err error) {
-	if valid == 0 {
-		valid = DefaultValidCert
-	} else if valid > MaxValidCert || valid < MinValidCert {
-		return nil, errors.Errorf("the certificate valid (min/max) is not between %d - %d", MinValidCert, MaxValidCert)
+func CASignCSRWithOptions(CACommonName string, csr *x509.CertificateRequest, caCert *x509.Certificate, privKey crypto.Signer, opts SignOptions) (certDer []byte, err error) {
+	if err := csr.CheckSignature(); err != nil {
+		return nil, errors.Wrapf(ErrCSRSignatureInvalid, "CSR signature verification failed: %v", err)
 	}
 
-	t, err := ParseCertType(certType)
+	now := time.Now()
+	var notAfter time.Time
+	if opts.ValidDuration > 0 {
+		if opts.ValidDuration < MinValidDuration {
+			return nil, errors.Errorf("certificate valid duration %s is below minimum %s", opts.ValidDuration, MinValidDuration)
+		}
+		maxValidDuration := time.Duration(MaxValidCert) * 24 * time.Hour
+		if opts.ValidDuration > maxValidDuration {
+			return nil, errors.Errorf("certificate valid duration %s exceeds maximum %s", opts.ValidDuration, maxValidDuration)
+		}
+		notAfter = now.Add(opts.ValidDuration)
+	} else {
+		days := opts.ValidDays
+		if days == 0 {
+			days = DefaultValidCert
+		} else if days > MaxValidCert || days < MinValidCert {
+			return nil, errors.Errorf("the certificate valid (min/max) is not between %d - %d", MinValidCert, MaxValidCert)
+		}
+		notAfter = now.AddDate(0, 0, days)
+	}
+
+	var notBefore time.Time
+	if !opts.NotBefore.IsZero() {
+		notBefore = opts.NotBefore
+	} else {
+		notBefore = now
+		if opts.Backdate > 0 {
+			notBefore = now.Add(-opts.Backdate)
+		}
+	}
+
+	if notBefore.Before(caCert.NotBefore) {
+		notBefore = caCert.NotBefore
+	}
+	if notAfter.After(caCert.NotAfter) {
+		notAfter = caCert.NotAfter
+	}
+	if notAfter.Before(notBefore) {
+		return nil, errors.New("certificate validity window ends before it starts after clamping to the CA")
+	}
+
+	t, err := ParseCertType(opts.CertType)
 	if err != nil {
 		return nil, err
 	}
@@ -325,8 +408,11 @@ func CASignCSR(CACommonName string, csr *x509.CertificateRequest, caCert *x509.C
 	}
 
 	csrTemplate := &x509.Certificate{
-		Signature:          csr.Signature,
-		SignatureAlgorithm: csr.SignatureAlgorithm,
+		// SignatureAlgorithm is set below: the CSR's algorithm is kept only
+		// when compatible with the CA signing key, so leaves may use a
+		// different key algorithm than the CA (e.g. Ed25519 leaf from an
+		// RSA CA). The zero value lets x509 pick the signer's default.
+		SignatureAlgorithm: signatureAlgorithmForSigner(csr.SignatureAlgorithm, privKey),
 
 		PublicKeyAlgorithm: csr.PublicKeyAlgorithm,
 		PublicKey:          csr.PublicKey,
@@ -334,8 +420,8 @@ func CASignCSR(CACommonName string, csr *x509.CertificateRequest, caCert *x509.C
 		SerialNumber:          serial,
 		Issuer:                caCert.Subject,
 		Subject:               csr.Subject,
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().AddDate(0, 0, valid),
+		NotBefore:             notBefore,
+		NotAfter:              notAfter,
 		KeyUsage:              keyUsage,
 		ExtKeyUsage:           extKeyUsage,
 		DNSNames:              csr.DNSNames,
@@ -347,18 +433,56 @@ func CASignCSR(CACommonName string, csr *x509.CertificateRequest, caCert *x509.C
 	return x509.CreateCertificate(rand.Reader, csrTemplate, caCert, csrTemplate.PublicKey, privKey)
 }
 
+// CASignCSR signs a Certificate Signing Request and returns the certificate
+// DER bytes.
+//
+// certType controls the KeyUsage/ExtKeyUsage of the issued certificate. It
+// accepts the same values as ParseCertType (e.g. "server", "client",
+// "email", "code-signing"). An empty string uses the historical default
+// ("server-client") for backward compatibility.
+//
+// CACommonName is deprecated and ignored (kept for backward compatibility).
+func CASignCSR(CACommonName string, csr *x509.CertificateRequest, caCert *x509.Certificate, privKey crypto.Signer, valid int, certType string) (certDer []byte, err error) {
+	return CASignCSRWithOptions(CACommonName, csr, caCert, privKey, SignOptions{ValidDays: valid, CertType: certType})
+}
+
 // CASignCSRLegacy preserves the historical behavior of CASignCSR (server+client
 // usage). Deprecated: use CASignCSR with an explicit certType.
 //
 // Deprecated: use CASignCSR with certType="server-client".
-func CASignCSRLegacy(CACommonName string, csr *x509.CertificateRequest, caCert *x509.Certificate, privKey *rsa.PrivateKey, valid int) ([]byte, error) {
+func CASignCSRLegacy(CACommonName string, csr *x509.CertificateRequest, caCert *x509.Certificate, privKey crypto.Signer, valid int) ([]byte, error) {
 	return CASignCSR(CACommonName, csr, caCert, privKey, valid, string(DefaultCertType))
+}
+
+// signatureAlgorithmForSigner returns the CSR's SignatureAlgorithm when it is
+// compatible with the CA signing key, otherwise the zero value so that
+// x509.CreateCertificate selects the default for the signer's key type. This
+// allows signing a CSR whose key algorithm differs from the CA's (e.g. an
+// Ed25519 leaf issued by an RSA CA).
+func signatureAlgorithmForSigner(csrAlg x509.SignatureAlgorithm, signer crypto.Signer) x509.SignatureAlgorithm {
+	switch signer.Public().(type) {
+	case *rsa.PublicKey:
+		switch csrAlg {
+		case x509.SHA256WithRSA, x509.SHA384WithRSA, x509.SHA512WithRSA:
+			return csrAlg
+		}
+	case *ecdsa.PublicKey:
+		switch csrAlg {
+		case x509.ECDSAWithSHA256, x509.ECDSAWithSHA384, x509.ECDSAWithSHA512:
+			return csrAlg
+		}
+	case ed25519.PublicKey:
+		if csrAlg == x509.PureEd25519 {
+			return csrAlg
+		}
+	}
+	return x509.UnknownSignatureAlgorithm
 }
 
 // RevokeCertificate builds a CRL DER bytes containing the given revoked
 // certificates. CACommonName is deprecated and ignored (kept for backward
 // compatibility).
-func RevokeCertificate(CACommonName string, certificateList []pkix.RevokedCertificate, caCert *x509.Certificate, privKey *rsa.PrivateKey) (crlDer []byte, err error) {
+func RevokeCertificate(CACommonName string, certificateList []pkix.RevokedCertificate, caCert *x509.Certificate, privKey crypto.Signer) (crlDer []byte, err error) {
 	crlNumber, err := newSerialNumber()
 	if err != nil {
 		return nil, err

@@ -89,6 +89,42 @@ The type string is case-insensitive and accepts hyphens, underscores, or
 spaces (`"code_signing"`, `"Code-Signing"`, and `"code signing"` are all
 equivalent).
 
+## Key algorithms and validity control
+
+The `Identity` struct supports RSA (default), ECDSA P-256, and Ed25519 keys
+for both CAs and issued certificates:
+
+```go
+// ECDSA CA with an Ed25519 leaf.
+rootCA, _ := goca.New("acme.com", goca.Identity{
+	Organization: "ACME Inc.", OrganizationalUnit: "Security",
+	Country: "NL", Locality: "Veldhoven", Province: "Noord-Brabant",
+	KeyAlgorithm: string(goca.KeyAlgorithmECDSAP256),
+})
+cert, _ := rootCA.IssueCertificate("leaf.acme.com", goca.Identity{
+	Organization: "ACME Inc.",
+	KeyAlgorithm: string(goca.KeyAlgorithmEd25519),
+	Type:         "client",
+})
+```
+
+- `KeyAlgorithm` — `"rsa"` (default), `"ecdsa-p256"`, or `"ed25519"`.
+  `KeyBitSize` applies only to RSA (default 2048).
+- `ValidDuration` — overrides `Valid` when `> 0`, enabling sub-day validity
+  (minimum 1 minute, maximum 3650 days). CA validity is day-granular, so a CA
+  with `ValidDuration` is rounded down to whole days (minimum 1).
+- `Backdate` — shifts issued certificates' `NotBefore` into the past for
+  clock-skew tolerance (never earlier than the CA's own `NotBefore`).
+
+To load a CA persisted as just a certificate and private key (e.g. a
+Kubernetes Secret), use `LoadCAFromPEM`, which derives the public key and
+synthesizes an empty CRL:
+
+```go
+loaded := &goca.CA{}
+err := loaded.LoadCAFromPEM(certPemBytes, keyPemBytes)
+```
+
 ## API
 
 | Function | Purpose |
@@ -96,6 +132,7 @@ equivalent).
 | `goca.New(commonName, identity)` | Create a Root CA |
 | `goca.NewCA(commonName, parentCert, parentKey, identity)` | Create an Intermediate CA |
 | `(*CA).LoadCA(privKey, pubKey, cert, crl []byte)` | Load a CA from PEM data |
+| `(*CA).LoadCAFromPEM(cert, key []byte)` | Load a CA from cert+key PEM only |
 | `(*CA).IssueCertificate(commonName, identity)` | Issue a new certificate |
 | `(*CA).SignCSRWithType(csr, valid, type)` | Sign an external CSR |
 | `(*CA).RevokeCertificate(cert)` | Revoke a certificate (updates CRL) |

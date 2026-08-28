@@ -2,6 +2,7 @@ package goca
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -32,6 +33,17 @@ type Identity struct {
 	Type       string `json:"type" example:"server"`
 	KeyBitSize int    `json:"key_size" example:"2048"` // Key Bit Size (default: 2048)
 	Valid      int    `json:"valid" example:"365"`     // Minimum 1 day, maximum 3650 days
+	// KeyAlgorithm selects the key generation algorithm for this identity.
+	// Accepted values: "rsa" (default), "ecdsa-p256", "ed25519". Empty = rsa.
+	// KeyBitSize applies only to RSA.
+	KeyAlgorithm string `json:"key_algorithm" example:"rsa"`
+	// ValidDuration overrides Valid when > 0, allowing sub-day validity
+	// (minimum 1 minute, maximum 3650 days). Used for both CAs and leaves.
+	ValidDuration time.Duration `json:"valid_duration" example:"2h"`
+	// Backdate shifts the NotBefore of issued leaves into the past by this
+	// duration (clock-skew tolerance). Ignored when creating a CA (CAs are
+	// always backdated 10 minutes). Never earlier than the CA's own NotBefore.
+	Backdate time.Duration `json:"backdate" example:"5m"`
 }
 
 // A CAData represents all the Certificate Authority Data as
@@ -42,9 +54,9 @@ type CAData struct {
 	//CSR            string `json:"csr" example:"-----BEGIN CERTIFICATE REQUEST-----...-----END CERTIFICATE REQUEST-----\n"` // Certificate Signing Request string
 	PrivateKey  string `json:"private_key" example:"-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----\n"` // Private Key string
 	PublicKey   string `json:"public_key" example:"-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----\n"`    // Public Key string
-	privateKey  *rsa.PrivateKey
+	privateKey  crypto.Signer
 	certificate *x509.Certificate
-	publicKey   *rsa.PublicKey
+	publicKey   crypto.PublicKey
 	//csr            *x509.CertificateRequest
 	crl            *x509.RevocationList
 	IsIntermediate bool
@@ -79,7 +91,7 @@ var ErrCSRSignatureInvalid = errors.New("CSR signature verification failed")
 var ErrParentCommonNameNotSpecified = ErrParentCANotProvided
 
 // create creates a new CA or intermediate CA
-func (c *CA) create(commonName string, parentCertificate *x509.Certificate, parentPrivateKey *rsa.PrivateKey, id Identity) error {
+func (c *CA) create(commonName string, parentCertificate *x509.Certificate, parentPrivateKey crypto.Signer, id Identity) error {
 
 	caData := CAData{}
 
@@ -92,25 +104,37 @@ func (c *CA) create(commonName string, parentCertificate *x509.Certificate, pare
 		return ErrCAMissingInfo
 	}
 
-	caKeys, err := key.CreateKeys(commonName, commonName, id.KeyBitSize)
+	kp, err := key.CreateKeyPair(key.KeyAlgorithm(id.KeyAlgorithm), id.KeyBitSize)
 	if err != nil {
 		return errors.Wrap(err, "failed to create keys")
 	}
 
-	privateKeyPem, err := key.ConvertPrivateKeyFromDerToPem(caKeys.Key)
+	privateKeyPem, err := key.ConvertSignerToPem(kp.Key)
 	if err != nil {
 		return errors.Wrap(err, "failed to convert private key to PEM")
 	}
 
-	publicKeyPem, err := key.ConvertPublicKeyFromDerToPem(caKeys.PublicKey)
+	publicKeyPem, err := key.ConvertAnyPublicKeyToPem(kp.PublicKey)
 	if err != nil {
 		return errors.Wrap(err, "failed to convert public key to PEM")
 	}
 
-	caData.privateKey = caKeys.Key
+	caData.privateKey = kp.Key
 	caData.PrivateKey = string(privateKeyPem)
-	caData.publicKey = caKeys.PublicKey
+	caData.publicKey = kp.PublicKey
 	caData.PublicKey = string(publicKeyPem)
+
+	// CA validity is day-granular: when ValidDuration is set it is converted
+	// to whole days (rounded down, minimum 1). Sub-day CA validity is not
+	// supported by cert.CreateRootCert/CreateCACert.
+	caValidDays := id.Valid
+	if id.ValidDuration > 0 {
+		days := int(id.ValidDuration.Hours() / 24)
+		if days < 1 {
+			days = 1
+		}
+		caValidDays = days
+	}
 
 	// is not intermediate CA
 	if !id.Intermediate {
@@ -124,11 +148,11 @@ func (c *CA) create(commonName string, parentCertificate *x509.Certificate, pare
 			id.Organization,
 			id.OrganizationalUnit,
 			id.EmailAddresses,
-			id.Valid,
+			caValidDays,
 			id.DNSNames,
 			id.IPAddresses,
-			caKeys.Key,
-			caKeys.PublicKey,
+			kp.Key,
+			kp.PublicKey,
 		)
 	} else {
 		// Is intermediate CA
@@ -155,13 +179,13 @@ func (c *CA) create(commonName string, parentCertificate *x509.Certificate, pare
 			id.Organization,
 			id.OrganizationalUnit,
 			id.EmailAddresses,
-			id.Valid,
+			caValidDays,
 			id.DNSNames,
 			id.IPAddresses,
-			caKeys.Key,
+			kp.Key,
 			parentPrivateKey,
 			parentCertificate,
-			caKeys.PublicKey,
+			kp.PublicKey,
 		)
 	}
 	if err != nil {
@@ -179,7 +203,7 @@ func (c *CA) create(commonName string, parentCertificate *x509.Certificate, pare
 	}
 	caData.Certificate = string(crtPem)
 
-	crlBytes, err := cert.RevokeCertificate(c.CommonName, []pkix.RevokedCertificate{}, certificate, caKeys.Key)
+	crlBytes, err := cert.RevokeCertificate(c.CommonName, []pkix.RevokedCertificate{}, certificate, kp.Key)
 	if err != nil {
 		return errors.Wrap(err, "failed to create CRL")
 	}
@@ -200,19 +224,15 @@ func (c *CA) create(commonName string, parentCertificate *x509.Certificate, pare
 	return nil
 }
 
-// LoadCA loads an existing CA from its PEM-encoded components.
+// LoadCA loads an existing CA from its PEM-encoded components. The private
+// key and certificate are required. An empty publicKeyPem derives the public
+// key from the private key, and an empty crlPem synthesizes an empty CRL.
 func (c *CA) LoadCA(privateKeyPem []byte, publicKeyPem []byte, certPem []byte, crlPem []byte) error {
 	if len(privateKeyPem) == 0 {
 		return errors.New("private key must be provided")
 	}
-	if len(publicKeyPem) == 0 {
-		return errors.New("public key must be provided")
-	}
 	if len(certPem) == 0 {
 		return errors.New("certificate must be provided")
-	}
-	if len(crlPem) == 0 {
-		return errors.New("CRL must be provided")
 	}
 
 	caData := CAData{
@@ -222,17 +242,11 @@ func (c *CA) LoadCA(privateKeyPem []byte, publicKeyPem []byte, certPem []byte, c
 		CRL:         string(crlPem),
 	}
 
-	privateKey, err := key.LoadPrivateKeyFromPem(privateKeyPem)
+	privateKey, err := key.LoadSignerFromPem(privateKeyPem)
 	if err != nil {
 		return errors.Wrap(err, "failed to load private key")
 	}
 	caData.privateKey = privateKey
-
-	publicKey, err := key.LoadPublicKeyFromPem(publicKeyPem)
-	if err != nil {
-		return errors.Wrap(err, "failed to load public key")
-	}
-	caData.publicKey = publicKey
 
 	crt, err := cert.LoadCertFromPem(certPem)
 	if err != nil {
@@ -240,16 +254,57 @@ func (c *CA) LoadCA(privateKeyPem []byte, publicKeyPem []byte, certPem []byte, c
 	}
 	caData.certificate = crt
 
-	crl, err := cert.LoadCRLFromPem(crlPem)
-	if err != nil {
-		return errors.Wrap(err, "failed to load CRL")
+	if len(publicKeyPem) == 0 {
+		pubPem, err := key.ConvertAnyPublicKeyToPem(privateKey.Public())
+		if err != nil {
+			return errors.Wrap(err, "failed to derive public key from private key")
+		}
+		caData.publicKey = privateKey.Public()
+		caData.PublicKey = string(pubPem)
+	} else {
+		publicKey, err := key.LoadAnyPublicKeyFromPem(publicKeyPem)
+		if err != nil {
+			return errors.Wrap(err, "failed to load public key")
+		}
+		caData.publicKey = publicKey
 	}
-	caData.crl = crl
+
+	if len(crlPem) == 0 {
+		crlDer, err := cert.RevokeCertificate(c.CommonName, []pkix.RevokedCertificate{}, crt, privateKey)
+		if err != nil {
+			return errors.Wrap(err, "failed to create CRL")
+		}
+		crl, err := x509.ParseRevocationList(crlDer)
+		if err != nil {
+			return errors.Wrap(err, "failed to parse CRL")
+		}
+		caData.crl = crl
+
+		crlPem, err := cert.ConvertCRLFromDerToPem(crlDer)
+		if err != nil {
+			return errors.Wrap(err, "failed to convert CRL to PEM")
+		}
+		caData.CRL = string(crlPem)
+	} else {
+		crl, err := cert.LoadCRLFromPem(crlPem)
+		if err != nil {
+			return errors.Wrap(err, "failed to load CRL")
+		}
+		caData.crl = crl
+	}
 
 	c.Data = caData
 	c.CommonName = caData.certificate.Subject.CommonName
 
 	return nil
+}
+
+// LoadCAFromPEM loads an existing CA from just its certificate and private
+// key PEM blocks. The public key is derived from the private key and an
+// empty CRL is synthesized. Handy for loading CAs persisted as cert+key
+// only (e.g. Kubernetes Secrets).
+func (c *CA) LoadCAFromPEM(certPem []byte, keyPem []byte) error {
+	return c.LoadCA(keyPem, nil, certPem, nil)
 }
 
 // signCSR generates a certificate from a CSR.
@@ -306,33 +361,35 @@ func (c *CA) issueCertificate(commonName string, id Identity) (certificate *Cert
 		certType:      id.Type,
 	}
 
-	certKeys, err := key.CreateKeys(c.CommonName, commonName, id.KeyBitSize)
+	kp, err := key.CreateKeyPair(key.KeyAlgorithm(id.KeyAlgorithm), id.KeyBitSize)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create certificate keys")
 	}
 
-	privateKeyPem, err := key.ConvertPrivateKeyFromDerToPem(certKeys.Key)
+	privateKeyPem, err := key.ConvertSignerToPem(kp.Key)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to convert private key to PEM")
 	}
 
-	rsaPrivateKeyPem, err := key.ConvertRsaPrivateKeyFromDerToPem(certKeys.Key)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to convert RSA private key to PEM")
+	rsaPrivateKeyPem := ""
+	if rsaKey, ok := kp.Key.(*rsa.PrivateKey); ok {
+		if rsaPem, rsaErr := key.ConvertRsaPrivateKeyFromDerToPem(rsaKey); rsaErr == nil {
+			rsaPrivateKeyPem = string(rsaPem)
+		}
 	}
 
-	publicKeyPem, err := key.ConvertPublicKeyFromDerToPem(certKeys.PublicKey)
+	publicKeyPem, err := key.ConvertAnyPublicKeyToPem(kp.PublicKey)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to convert public key to PEM")
 	}
 
-	certificate.privateKey = certKeys.Key
+	certificate.privateKey = kp.Key
 	certificate.PrivateKey = string(privateKeyPem)
-	certificate.RsaPrivateKey = string(rsaPrivateKeyPem)
-	certificate.publicKey = certKeys.PublicKey
+	certificate.RsaPrivateKey = rsaPrivateKeyPem
+	certificate.publicKey = kp.PublicKey
 	certificate.PublicKey = string(publicKeyPem)
 
-	csrBytes, err := cert.CreateCSR(c.CommonName, commonName, id.Country, id.Province, id.Locality, id.Organization, id.OrganizationalUnit, id.EmailAddresses, id.DNSNames, id.IPAddresses, certKeys.Key)
+	csrBytes, err := cert.CreateCSR(c.CommonName, commonName, id.Country, id.Province, id.Locality, id.Organization, id.OrganizationalUnit, id.EmailAddresses, id.DNSNames, id.IPAddresses, kp.Key)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to create CSR")
 	}
@@ -348,7 +405,7 @@ func (c *CA) issueCertificate(commonName string, id Identity) (certificate *Cert
 
 	certificate.csr = csr
 	certificate.CSR = string(csrPem)
-	certBytes, err := cert.CASignCSR(c.CommonName, csr, c.Data.certificate, c.Data.privateKey, id.Valid, id.Type)
+	certBytes, err := cert.CASignCSRWithOptions(c.CommonName, csr, c.Data.certificate, c.Data.privateKey, cert.SignOptions{ValidDays: id.Valid, ValidDuration: id.ValidDuration, CertType: id.Type, Backdate: id.Backdate})
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to sign CSR")
 	}

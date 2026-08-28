@@ -9,6 +9,7 @@
 package goca
 
 import (
+	"crypto"
 	"crypto/rsa"
 	"crypto/x509"
 
@@ -31,8 +32,8 @@ type Certificate struct {
 	PrivateKey    string                   `json:"private_key" example:"-----BEGIN PRIVATE KEY-----...-----END PRIVATE KEY-----\n"`             // Certificate Private Key string
 	PublicKey     string                   `json:"public_key" example:"-----BEGIN PUBLIC KEY-----...-----END PUBLIC KEY-----\n"`                // Certificate Public Key string
 	CACertificate string                   `json:"ca_certificate" example:"-----BEGIN CERTIFICATE-----...-----END CERTIFICATE-----\n"`          // CA Certificate as string
-	privateKey    *rsa.PrivateKey          // Certificate Private Key object rsa.PrivateKey
-	publicKey     *rsa.PublicKey           // Certificate Private Key object rsa.PublicKey
+	privateKey    crypto.Signer            // Certificate Private Key object crypto.Signer (RSA, ECDSA, or Ed25519)
+	publicKey     crypto.PublicKey         // Certificate Public Key object crypto.PublicKey
 	csr           *x509.CertificateRequest // Certificate Sigining Request object x509.CertificateRequest
 	certificate   *x509.Certificate        // Certificate certificate *x509.Certificate
 	caCertificate *x509.Certificate        // CA Certificate *x509.Certificate
@@ -50,7 +51,7 @@ func New(commonName string, identity Identity) (ca *CA, err error) {
 }
 
 // NewCA creates a new Root or Intermediate Certificate Authority
-func NewCA(commonName string, parentCertificate *x509.Certificate, parentPrivateKey *rsa.PrivateKey, identity Identity) (ca *CA, err error) {
+func NewCA(commonName string, parentCertificate *x509.Certificate, parentPrivateKey crypto.Signer, identity Identity) (ca *CA, err error) {
 	ca = &CA{
 		CommonName: commonName,
 	}
@@ -73,15 +74,30 @@ func (c *CA) GetPrivateKey() string {
 	return c.Data.PrivateKey
 }
 
-// GoPrivateKey returns the Private Key as Go bytes rsa.PrivateKey
+// GoPrivateKey returns the Private Key as *rsa.PrivateKey.
+// Returns nil when the CA key is not RSA. Prefer GoSigner for new code.
 func (c *CA) GoPrivateKey() *rsa.PrivateKey {
-	return c.Data.privateKey
+	if k, ok := c.Data.privateKey.(*rsa.PrivateKey); ok {
+		return k
+	}
+	return nil
 }
 
-// GoPublicKey returns the Public Key as Go bytes rsa.PublicKey
+// GoPublicKey returns the Public Key as *rsa.PublicKey.
+// Returns nil when the CA key is not RSA. Prefer GoPublic for new code.
 func (c *CA) GoPublicKey() *rsa.PublicKey {
-	return c.Data.publicKey
+	if k, ok := c.Data.publicKey.(*rsa.PublicKey); ok {
+		return k
+	}
+	return nil
 }
+
+// GoSigner returns the CA private key as a crypto.Signer (RSA, ECDSA, or
+// Ed25519). Prefer this over GoPrivateKey for new code.
+func (c *CA) GoSigner() crypto.Signer { return c.Data.privateKey }
+
+// GoPublic returns the CA public key as a crypto.PublicKey.
+func (c *CA) GoPublic() crypto.PublicKey { return c.Data.publicKey }
 
 // GetCertificate returns Certificate Authority Certificate as string
 func (c *CA) GetCertificate() string {
